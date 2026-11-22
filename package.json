@@ -1,0 +1,103 @@
+{
+  "name": "dsh-antigravity-acp",
+  "version": "0.1.0",
+  "displayName": "Antigravity ACP (Dual Mode)",
+  "description": "Dual-mode Antigravity ACP (agy CLI 1.5.x) plugin for DeepSeek Harness (DSH): LlmAdapter with private loopback MCP tool bridge + autonomous SubagentProvider",
+  "license": "MIT",
+  "author": "ailipi <34607296+qq1299235059@users.noreply.github.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/qq1299235059/dsh-antigravity-acp.git"
+  },
+  "homepage": "https://github.com/qq1299235059/dsh-antigravity-acp#readme",
+  "bugs": {
+    "url": "https://github.com/qq1299235059/dsh-antigravity-acp/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "dsh-bundle",
+    "deepseek-harness",
+    "antigravity",
+    "acp",
+    "agent-client-protocol",
+    "mcp",
+    "cordis",
+    "gemini",
+    "subagent"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=22.19"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./llm": {
+      "types": "./dist/llm-plugin.d.ts",
+      "default": "./dist/llm-plugin.js"
+    },
+    "./subagent": {
+      "types": "./dist/subagent-plugin.d.ts",
+      "default": "./dist/subagent-plugin.js"
+    }
+  },
+  "bin": {
+    "dsh-antigravity-acp": "./dist/cli.js"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "files": [
+    "dist",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "tsc -p tsconfig.build.json",
+    "check": "npm run typecheck && npm run test && npm run build",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "1.4.0",
+    "@deepseek-ai/schemastery": "^3.18.4",
+    "@modelcontextprotocol/sdk": "1.32.2"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.4 <5",
+    "@deepseek-ai/dsh-llm": ">=0.2.2-rc.1 <0.3.0-0",
+    "@deepseek-ai/dsh-subprocess": ">=0.2.2-rc.1 <0.3.0-0",
+    "@deepseek-ai/dsh-subagent": ">=0.2.2-rc.1 <0.3.0-0",
+    "@deepseek-ai/dsh-attachment": ">=0.2.2-rc.1 <0.3.0-0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-subagent": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-attachment": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.1.0",
+    "@deepseek-ai/dsh-llm": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-subagent": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-subprocess": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-subprocess-local": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-attachment": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-brand": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-session": "0.2.2-rc.3",
+    "@types/node": "^22.19.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
+  }
+}

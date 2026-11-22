@@ -1,0 +1,10 @@
+- insert:
+    - id: antigravity-runtime
+      name: dsh-antigravity-acp
+      inject: [subprocess]
+    - id: llm-antigravity-acp
+      name: dsh-antigravity-acp/llm
+      inject: [llm, antigravityRuntime]
+    - id: subagent-antigravity-acp
+      name: dsh-antigravity-acp/subagent
+      inject: [subagents, antigravityRuntime]
