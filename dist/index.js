@@ -491,6 +491,7 @@ export function apply(ctx, config) {
 // Re-export shared taxonomy, config schemas, contracts, and core helpers via named exports.
 export { AntigravityAcpError, redactSensitiveText, toLlmError, } from './shared/errors.js';
 export { AuthMethodSchema, LlmPluginConfigSchema, PermissionFallbackSchema, PermissionModeSchema, RuntimeConfigSchema, SubagentPluginConfigSchema, } from './shared/config.js';
+export { DEFAULT_PLUGIN_BRANCH, DEFAULT_PLUGIN_GITHUB_API_BASE, DEFAULT_PLUGIN_PACKAGE_NAME, DEFAULT_PLUGIN_RAW_BASE, DEFAULT_PLUGIN_REPO_NAME, DEFAULT_PLUGIN_REPO_OWNER, applyPluginUpdate, checkPluginUpdate, extractInstalledCommitFromLockfile, inferDshProfileDir, parseGitHubRepoUrl, readInstalledPluginInfo, readInstalledPluginManifestSync, validatePluginUpdateSpec, } from './runtime/updater.js';
 export { ANTIGRAVITY_CONTROL_INVOCATIONS, ANTIGRAVITY_CONTROL_NAMESPACE, ANTIGRAVITY_CONTROL_PACKAGE, ANTIGRAVITY_CONTROL_SERVICE_KEY, AntigravityControlService, registerAntigravityControlRemote, sanitizeControlError, stripUndefinedJson, } from './remote/control-remote.js';
 export { UI_CONFIG_FILENAME, UI_SECRETS_FILENAME, loadUiOverrides, mergeRuntimeConfigWithOverrides, saveUiOverrides, } from './remote/ui-store.js';
 export { ANTIGRAVITY_CLI_MANIFEST_BASE, MINIMUM_AGY_VERSION, antigravityCliTarget, compareSemver, parseAntigravityCliRelease, tryParseSemver, } from './runtime/release.js';

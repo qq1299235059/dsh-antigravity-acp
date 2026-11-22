@@ -1,6 +1,6 @@
 {
   "name": "dsh-antigravity-acp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "displayName": "Antigravity ACP (Dual Mode)",
   "description": "Dual-mode Antigravity ACP (agy CLI 1.5.x) plugin for DeepSeek Harness (DSH): LlmAdapter with private loopback MCP tool bridge + autonomous SubagentProvider",
   "license": "MIT",

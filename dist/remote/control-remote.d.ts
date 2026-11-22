@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { TypertRemoteService, type InvocationDescriptor } from '@deepseek-ai/dsh-typert-protocol';
-import type { AntigravityAuthStartInput, AntigravityAuthSubmitCodeInput, AntigravityControlStatusSnapshot, AntigravityInstallInput, AntigravityRuntimeService, AntigravitySaveConfigInput } from '../shared/contracts.js';
+import { type PluginManagerLike } from '../runtime/updater.js';
+import type { AntigravityAuthStartInput, AntigravityAuthSubmitCodeInput, AntigravityControlStatusSnapshot, AntigravityInstallInput, AntigravityPluginUpdateInput, AntigravityRuntimeService, AntigravitySaveConfigInput } from '../shared/contracts.js';
 export declare const ANTIGRAVITY_CONTROL_PACKAGE = "dsh-antigravity-acp";
 export declare const ANTIGRAVITY_CONTROL_SERVICE_KEY = "antigravityControl";
 export declare const ANTIGRAVITY_CONTROL_NAMESPACE = "antigravityControl";
@@ -17,7 +18,16 @@ export interface AntigravityControlOptions {
     readonly env?: Readonly<Record<string, string | undefined>>;
     readonly homeDir?: string;
     readonly platform?: NodeJS.Platform;
+    readonly arch?: string;
+    readonly musl?: boolean;
     readonly profileDir?: string;
+    readonly dshProfileDir?: string;
+    readonly packageRootDir?: string;
+    readonly pluginManager?: PluginManagerLike;
+    readonly fetch?: typeof globalThis.fetch;
+    readonly githubApiBase?: string;
+    readonly rawGithubBase?: string;
+    readonly cliManifestBaseUrl?: string;
 }
 /**
  * Recursively omit `undefined` properties and non-finite numbers so returned payloads satisfy
@@ -33,7 +43,7 @@ export declare function sanitizeControlError(error: unknown, extraSecrets?: read
 export declare const ANTIGRAVITY_CONTROL_INVOCATIONS: readonly InvocationDescriptor[];
 /**
  * Cordis Typert Remote service exposing Antigravity runtime control, installation,
- * OAuth/API-key authentication, model discovery, and quota probing to the DSH UI.
+ * OAuth/API-key authentication, model discovery, quota probing, and plugin self-updates to the DSH UI.
  *
  * NOTE: Uses TypeScript `private` fields only (never ES `#private`), because Cordis
  * wraps service instances in `Proxy` objects when resolving `ctx.get('antigravityControl')`.
@@ -43,12 +53,27 @@ export declare class AntigravityControlService extends TypertRemoteService {
     private readonly logger?;
     private readonly env;
     private readonly platform;
+    private readonly arch;
+    private readonly musl?;
     private readonly profileDirOverride?;
+    private readonly dshProfileDirOverride?;
+    private readonly packageRootDir?;
+    private readonly pluginManagerOverride?;
+    private readonly fetchImpl?;
+    private readonly githubApiBase?;
+    private readonly rawGithubBase?;
+    private readonly cliManifestBaseUrl?;
     private installState;
     private installAbort;
     private authState;
     private authAbort;
     private pendingCodeDeferred;
+    private pluginUpdateState;
+    private lastCheckResult;
+    private updateCheckAbort;
+    private updateCheckTask;
+    private activeUpdateRequestId;
+    private activeUpdateTask;
     private models;
     private modelsError;
     private lastQuota;
@@ -56,8 +81,12 @@ export declare class AntigravityControlService extends TypertRemoteService {
     private disposed;
     constructor(ctx: Context, runtime: AntigravityRuntimeService, options?: AntigravityControlOptions);
     private resolveProfileDir;
+    private resolvePluginManager;
+    private resolveDshProfileDir;
     private activeSecrets;
     private buildAuthSnapshot;
+    private readLocalPluginInfoSafe;
+    private formatPluginUpdateSnapshot;
     private cancelActiveAuthInternal;
     status(): Promise<AntigravityControlStatusSnapshot>;
     installCli(input?: AntigravityInstallInput): Promise<AntigravityControlStatusSnapshot>;
@@ -69,6 +98,9 @@ export declare class AntigravityControlService extends TypertRemoteService {
     logout(): Promise<AntigravityControlStatusSnapshot>;
     refreshModels(): Promise<AntigravityControlStatusSnapshot>;
     refreshQuota(): Promise<AntigravityControlStatusSnapshot>;
+    checkUpdate(): Promise<AntigravityControlStatusSnapshot>;
+    updatePlugin(input?: AntigravityPluginUpdateInput): Promise<AntigravityControlStatusSnapshot>;
+    cancelPluginUpdate(): Promise<AntigravityControlStatusSnapshot>;
     dispose(): void;
 }
 /** Structural contribution accepted by DSH `TypertRegistry.register(...)`. */

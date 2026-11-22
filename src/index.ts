@@ -696,6 +696,10 @@ export type {
   AntigravityInstallInput,
   AntigravityInstallTaskPhase,
   AntigravityInstallTaskState,
+  AntigravityPluginUpdateInput,
+  AntigravityPluginUpdatePhase,
+  AntigravityPluginUpdateReason,
+  AntigravityPluginUpdateState,
   AntigravityProfile,
   AntigravityRuntimeService,
   AntigravitySaveConfigInput,
@@ -705,6 +709,30 @@ export type {
   QuotaWindow,
   ThinkingOption,
 } from './shared/contracts.js';
+
+export {
+  DEFAULT_PLUGIN_BRANCH,
+  DEFAULT_PLUGIN_GITHUB_API_BASE,
+  DEFAULT_PLUGIN_PACKAGE_NAME,
+  DEFAULT_PLUGIN_RAW_BASE,
+  DEFAULT_PLUGIN_REPO_NAME,
+  DEFAULT_PLUGIN_REPO_OWNER,
+  applyPluginUpdate,
+  checkPluginUpdate,
+  extractInstalledCommitFromLockfile,
+  inferDshProfileDir,
+  parseGitHubRepoUrl,
+  readInstalledPluginInfo,
+  readInstalledPluginManifestSync,
+  validatePluginUpdateSpec,
+  type ApplyPluginUpdateOptions,
+  type CheckPluginUpdateOptions,
+  type InstalledPluginInfo,
+  type PluginManagerChangeResultLike,
+  type PluginManagerLike,
+  type PluginUpdateApplyResult,
+  type PluginUpdateCheckResult,
+} from './runtime/updater.js';
 
 export {
   ANTIGRAVITY_CONTROL_INVOCATIONS,

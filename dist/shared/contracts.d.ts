@@ -286,6 +286,42 @@ export interface AntigravityAuthTaskState {
     readonly finishedAt?: string;
     readonly error?: string;
 }
+/** Phase of checking or updating the plugin bundle itself. */
+export type AntigravityPluginUpdatePhase = 'idle' | 'checking' | 'updating' | 'succeeded' | 'failed' | 'cancelled';
+/** Reason code explaining plugin version comparison outcome. */
+export type AntigravityPluginUpdateReason = 'unchecked' | 'up-to-date' | 'newer-version' | 'newer-commit' | 'ahead';
+/** Plugin bundle version check and self-update state exposed by the control remote. */
+export interface AntigravityPluginUpdateState {
+    readonly packageName: string;
+    readonly currentVersion: string;
+    readonly currentCommit?: string;
+    readonly installedSpec?: string;
+    readonly repoUrl: string;
+    readonly latestVersion?: string;
+    readonly latestCommit?: string;
+    readonly latestMessage?: string;
+    readonly latestDate?: string;
+    readonly commitUrl?: string;
+    readonly installSpec?: string;
+    readonly updateAvailable: boolean;
+    readonly reason: AntigravityPluginUpdateReason;
+    readonly canAutoUpdate: boolean;
+    readonly cliLatestVersion?: string;
+    readonly cliUpdateAvailable?: boolean;
+    readonly phase: AntigravityPluginUpdatePhase;
+    readonly restartRequired: boolean;
+    readonly restartReason?: string;
+    readonly message: string;
+    readonly checkedAt?: string;
+    readonly startedAt?: string;
+    readonly finishedAt?: string;
+    readonly error?: string;
+}
+/** Input payload for `antigravityControl/updatePlugin`. */
+export interface AntigravityPluginUpdateInput {
+    readonly targetSpec?: string;
+    readonly force?: boolean;
+}
 /** JSON-safe model summary returned in {@link AntigravityControlStatusSnapshot}. */
 export interface AntigravityControlModelSummary {
     readonly id: string;
@@ -325,6 +361,7 @@ export interface AntigravityControlStatusSnapshot {
     };
     readonly install: AntigravityInstallTaskState;
     readonly auth: AntigravityAuthTaskState;
+    readonly pluginUpdate: AntigravityPluginUpdateState;
     readonly models: readonly AntigravityControlModelSummary[];
     readonly modelsError?: string;
     readonly quota?: {

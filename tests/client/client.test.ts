@@ -338,6 +338,17 @@ function createStatusFixture(overrides: Record<string, unknown> = {}) {
       phase: 'idle',
       message: '',
     },
+    pluginUpdate: {
+      packageName: 'dsh-antigravity-acp',
+      currentVersion: '0.2.0',
+      repoUrl: 'https://github.com/qq1299235059/dsh-antigravity-acp',
+      updateAvailable: false,
+      reason: 'unchecked',
+      canAutoUpdate: true,
+      phase: 'idle',
+      restartRequired: false,
+      message: '',
+    },
     models: [],
     updatedAt: '2026-11-22T01:00:00.000Z',
     ...overrides,
@@ -365,7 +376,7 @@ describe('dsh-antigravity-acp pure browser client (src/client.js)', () => {
     expect(typeof loaded.exports.apply).toBe('function');
   });
 
-  it('mounts all 10 strict RPC descriptors, registers settings.section & icon slots, and disposes cleanly', async () => {
+  it('mounts all 13 strict RPC descriptors, registers settings.section & icon slots, and disposes cleanly', async () => {
     const { ReactStub } = createReactTestHarness();
     const { exports } = loadClientModule({ reactStub: ReactStub });
 
@@ -418,10 +429,19 @@ describe('dsh-antigravity-acp pure browser client (src/client.js)', () => {
 
     expect(mountCalls).toHaveLength(1);
     expect(mountCalls[0].package).toBe('dsh-antigravity-acp');
-    expect(mountCalls[0].descriptors).toHaveLength(10);
+    expect(mountCalls[0].descriptors).toHaveLength(13);
 
-    const zeroArg = ['status', 'installCancel', 'authCancel', 'logout', 'refreshModels', 'refreshQuota'];
-    const oneArg = ['installCli', 'saveConfig', 'authStart', 'authSubmitCode'];
+    const zeroArg = [
+      'status',
+      'installCancel',
+      'authCancel',
+      'logout',
+      'refreshModels',
+      'refreshQuota',
+      'checkUpdate',
+      'cancelPluginUpdate',
+    ];
+    const oneArg = ['installCli', 'saveConfig', 'authStart', 'authSubmitCode', 'updatePlugin'];
     const reservedNamespaceMembers = new Set([
       'ctx',
       'empty',
@@ -1046,5 +1066,149 @@ describe('dsh-antigravity-acp pure browser client (src/client.js)', () => {
     await vi.advanceTimersByTimeAsync(4500);
     await flushMicrotasks();
     expect(statusCount).toBe(1);
+  });
+
+  it('exercises plugin version check, update polling, restart banner, CLI update badge, cancel, and manual CLI hint', async () => {
+    vi.useFakeTimers();
+    const { ReactStub, mount } = createReactTestHarness();
+    const { exports } = loadClientModule({ reactStub: ReactStub, navigatorLanguage: 'en-US' });
+
+    const newSha = 'c'.repeat(40);
+    let currentStatus = createStatusFixture({
+      pluginUpdate: {
+        packageName: 'dsh-antigravity-acp',
+        currentVersion: '0.1.0',
+        currentCommit: 'a'.repeat(40),
+        repoUrl: 'https://github.com/qq1299235059/dsh-antigravity-acp',
+        updateAvailable: false,
+        reason: 'unchecked',
+        canAutoUpdate: true,
+        phase: 'idle',
+        restartRequired: false,
+        message: '',
+      },
+    });
+
+    const rpcCalls: Array<{ method: string; args: unknown[] }> = [];
+    const callControl = vi.fn(async (method: string, ...args: unknown[]) => {
+      rpcCalls.push({ method, args });
+      if (method === 'checkUpdate') {
+        currentStatus = createStatusFixture({
+          pluginUpdate: {
+            packageName: 'dsh-antigravity-acp',
+            currentVersion: '0.1.0',
+            currentCommit: 'a'.repeat(40),
+            repoUrl: 'https://github.com/qq1299235059/dsh-antigravity-acp',
+            latestVersion: '0.2.0',
+            latestCommit: newSha,
+            latestMessage: 'feat: self update',
+            latestDate: '2026-11-22T06:30:00Z',
+            commitUrl: `https://github.com/qq1299235059/dsh-antigravity-acp/commit/${newSha}`,
+            installSpec: `github:qq1299235059/dsh-antigravity-acp#${newSha}`,
+            updateAvailable: true,
+            reason: 'newer-version',
+            canAutoUpdate: true,
+            cliLatestVersion: '1.6.0',
+            cliUpdateAvailable: true,
+            phase: 'idle',
+            restartRequired: false,
+            checkedAt: '2026-11-22T06:31:00Z',
+            message: 'New version available: v0.2.0',
+          },
+        });
+        return currentStatus;
+      }
+      if (method === 'updatePlugin') {
+        currentStatus = createStatusFixture({
+          pluginUpdate: {
+            ...(currentStatus.pluginUpdate as Record<string, unknown>),
+            phase: 'updating',
+            message: 'Installing updated plugin bundle...',
+          },
+        });
+        return currentStatus;
+      }
+      if (method === 'cancelPluginUpdate') {
+        currentStatus = createStatusFixture({
+          pluginUpdate: {
+            ...(currentStatus.pluginUpdate as Record<string, unknown>),
+            phase: 'cancelled',
+            restartRequired: false,
+            message: 'Plugin update cancelled',
+          },
+        });
+        return currentStatus;
+      }
+      return currentStatus;
+    });
+
+    const view = mount(exports.AntigravitySettingsSection, { callControl });
+    await flushMicrotasks();
+
+    // Check for updates (0-arg)
+    await (findByAttr(view.getTree(), 'data-acp-action', 'check-update').props.onClick as () => Promise<void>)();
+    await flushMicrotasks();
+    expect(rpcCalls.at(-1)).toEqual({ method: 'checkUpdate', args: [] });
+    expect(textContent(findByAttr(view.getTree(), 'data-acp-badge', 'plugin-update'))).toBe('Update Available');
+    expect(textContent(findByAttr(view.getTree(), 'data-acp-plugin-latest', 'true'))).toContain('v0.2.0');
+    expect(textContent(findByAttr(view.getTree(), 'data-acp-badge', 'cli-update'))).toContain('v1.6.0');
+
+    // Start plugin update (1-arg `{}`) -> transitions to updating + cancel button + starts polling
+    await (findByAttr(view.getTree(), 'data-acp-action', 'update-plugin').props.onClick as () => Promise<void>)();
+    await flushMicrotasks();
+    expect(rpcCalls.at(-1)).toEqual({ method: 'updatePlugin', args: [{}] });
+    expect(findByAttr(view.getTree(), 'data-acp-action', 'cancel-plugin-update')).toBeDefined();
+
+    // Cancel plugin update -> returns to cancelled
+    await (findByAttr(view.getTree(), 'data-acp-action', 'cancel-plugin-update').props.onClick as () => Promise<void>)();
+    await flushMicrotasks();
+    expect(rpcCalls.at(-1)).toEqual({ method: 'cancelPluginUpdate', args: [] });
+
+    // Start update again and let polling finish with restartRequired: true
+    await (findByAttr(view.getTree(), 'data-acp-action', 'update-plugin').props.onClick as () => Promise<void>)();
+    await flushMicrotasks();
+    currentStatus = createStatusFixture({
+      pluginUpdate: {
+        ...(currentStatus.pluginUpdate as Record<string, unknown>),
+        currentVersion: '0.2.0',
+        currentCommit: newSha,
+        updateAvailable: false,
+        reason: 'up-to-date',
+        phase: 'succeeded',
+        restartRequired: true,
+        restartReason: 'no-hmr',
+        message: 'Updated to v0.2.0; restart DSH to finish applying the new version.',
+      },
+    });
+    await vi.advanceTimersByTimeAsync(1500);
+    await flushMicrotasks();
+    expect(findByAttr(view.getTree(), 'data-acp-banner', 'restart-required')).toBeDefined();
+    expect(textContent(findByAttr(view.getTree(), 'data-acp-badge', 'plugin-update'))).toBe('Restart Required');
+
+    // Manual CLI hint shown & update button disabled when canAutoUpdate is false + updateAvailable
+    currentStatus = createStatusFixture({
+      pluginUpdate: {
+        packageName: 'dsh-antigravity-acp',
+        currentVersion: '0.1.0',
+        repoUrl: 'https://github.com/qq1299235059/dsh-antigravity-acp',
+        latestVersion: '0.2.0',
+        installSpec: `github:qq1299235059/dsh-antigravity-acp#${newSha}`,
+        updateAvailable: true,
+        reason: 'newer-version',
+        canAutoUpdate: false,
+        phase: 'idle',
+        restartRequired: false,
+        checkedAt: '2026-11-22T06:35:00Z',
+        message: 'Update available',
+      },
+    });
+    await (findByAttr(view.getTree(), 'data-acp-action', 'refresh-status').props.onClick as () => Promise<void>)();
+    await flushMicrotasks();
+    expect(findByAttr(view.getTree(), 'data-acp-action', 'update-plugin').props.disabled).toBe(true);
+    expect(textContent(findByAttr(view.getTree(), 'data-acp-manual-update', 'true'))).toContain(
+      `dsh plugin --profile web add github:qq1299235059/dsh-antigravity-acp#${newSha}`,
+    );
+
+    view.unmount();
   });
 });

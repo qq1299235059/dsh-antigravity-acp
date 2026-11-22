@@ -1,5 +1,8 @@
+import crypto from 'node:crypto';
 import { RemoteError, TypertRemoteService, } from '@deepseek-ai/dsh-typert-protocol';
 import { validateAuthConfig, validateProxyUrl } from '../runtime/profile.js';
+import { compareSemver, tryParseSemver } from '../runtime/release.js';
+import { applyPluginUpdate, checkPluginUpdate, readInstalledPluginInfo, readInstalledPluginManifestSync, validatePluginUpdateSpec, } from '../runtime/updater.js';
 import { AntigravityAcpError, redactSensitiveText } from '../shared/errors.js';
 import { saveUiOverrides } from './ui-store.js';
 export const ANTIGRAVITY_CONTROL_PACKAGE = 'dsh-antigravity-acp';
@@ -201,6 +204,23 @@ function parseAuthSubmitCodeInput(value) {
     }
     return { code: code.trim() };
 }
+function parseUpdatePluginInput(value) {
+    if (value === undefined) {
+        return undefined;
+    }
+    if (!isPlainRecord(value)) {
+        throw badRequest('updatePlugin input must be a plain object');
+    }
+    const targetSpec = assertOptionalString(value, 'targetSpec');
+    const force = assertOptionalBoolean(value, 'force');
+    if (targetSpec !== undefined && targetSpec.trim() === '') {
+        throw badRequest('Field "targetSpec" must not be empty');
+    }
+    return stripUndefinedJson({
+        ...(targetSpec !== undefined ? { targetSpec: targetSpec.trim() } : {}),
+        ...(force !== undefined ? { force } : {}),
+    });
+}
 function parseStatusResult(value) {
     if (!isPlainRecord(value)) {
         throw badRequest('Control status snapshot must be a plain object');
@@ -256,6 +276,9 @@ export const ANTIGRAVITY_CONTROL_INVOCATIONS = [
     makeDirectDescriptor('logout'),
     makeDirectDescriptor('refreshModels'),
     makeDirectDescriptor('refreshQuota'),
+    makeDirectDescriptor('checkUpdate'),
+    makeDirectDescriptor('updatePlugin', makeInputCodec('dsh-antigravity-acp#ControlUpdatePluginInput', parseUpdatePluginInput)),
+    makeDirectDescriptor('cancelPluginUpdate'),
 ];
 function mapDiscoveredModels(models) {
     return models.map((model) => ({
@@ -331,9 +354,30 @@ function buildRuntimeConfigPatchFromSaveInput(input) {
     }
     return patch;
 }
+function toggleGithubSpecFormat(spec, owner, repo) {
+    const fragmentMatch = /(#.+)$/.exec(spec);
+    const fragment = fragmentMatch ? fragmentMatch[1] : '';
+    if (/^github:/i.test(spec)) {
+        return `https://github.com/${owner}/${repo}.git${fragment}`;
+    }
+    return `github:${owner}/${repo}${fragment}`;
+}
+function buildUpdateCheckMessage(result) {
+    const shortCommit = result.latestCommit ? ` (${result.latestCommit.slice(0, 7)})` : '';
+    if (result.reason === 'newer-version') {
+        return `New version available: v${result.latestVersion ?? 'unknown'}${shortCommit}`;
+    }
+    if (result.reason === 'newer-commit') {
+        return `New commit available on ${result.branch}${shortCommit}`;
+    }
+    if (result.reason === 'ahead') {
+        return `Local v${result.currentVersion} is ahead of ${result.branch}${result.latestVersion ? ` (v${result.latestVersion})` : ''}`;
+    }
+    return `Plugin v${result.currentVersion} is up to date${shortCommit}`;
+}
 /**
  * Cordis Typert Remote service exposing Antigravity runtime control, installation,
- * OAuth/API-key authentication, model discovery, and quota probing to the DSH UI.
+ * OAuth/API-key authentication, model discovery, quota probing, and plugin self-updates to the DSH UI.
  *
  * NOTE: Uses TypeScript `private` fields only (never ES `#private`), because Cordis
  * wraps service instances in `Proxy` objects when resolving `ctx.get('antigravityControl')`.
@@ -343,7 +387,16 @@ export class AntigravityControlService extends TypertRemoteService {
     logger;
     env;
     platform;
+    arch;
+    musl;
     profileDirOverride;
+    dshProfileDirOverride;
+    packageRootDir;
+    pluginManagerOverride;
+    fetchImpl;
+    githubApiBase;
+    rawGithubBase;
+    cliManifestBaseUrl;
     installState = {
         phase: 'idle',
         message: '',
@@ -355,6 +408,12 @@ export class AntigravityControlService extends TypertRemoteService {
     };
     authAbort = null;
     pendingCodeDeferred = null;
+    pluginUpdateState;
+    lastCheckResult = null;
+    updateCheckAbort = null;
+    updateCheckTask = null;
+    activeUpdateRequestId = null;
+    activeUpdateTask = null;
     models = [];
     modelsError = undefined;
     lastQuota = undefined;
@@ -366,10 +425,61 @@ export class AntigravityControlService extends TypertRemoteService {
         this.logger = options.logger;
         this.env = options.env ?? process.env;
         this.platform = options.platform ?? process.platform;
+        this.arch = options.arch ?? process.arch;
+        this.musl = options.musl;
         this.profileDirOverride = options.profileDir;
+        this.dshProfileDirOverride = options.dshProfileDir;
+        this.packageRootDir = options.packageRootDir;
+        this.pluginManagerOverride = options.pluginManager;
+        this.fetchImpl = options.fetch;
+        this.githubApiBase = options.githubApiBase;
+        this.rawGithubBase = options.rawGithubBase;
+        this.cliManifestBaseUrl = options.cliManifestBaseUrl;
+        const initialManifest = readInstalledPluginManifestSync(this.packageRootDir);
+        this.pluginUpdateState = {
+            packageName: initialManifest.packageName,
+            currentVersion: initialManifest.currentVersion,
+            repoUrl: initialManifest.repoUrl,
+            updateAvailable: false,
+            reason: 'unchecked',
+            canAutoUpdate: typeof this.resolvePluginManager()?.installBundle === 'function',
+            phase: 'idle',
+            restartRequired: false,
+            message: '',
+        };
     }
     resolveProfileDir() {
         return this.profileDirOverride ?? this.runtime.resolveProfile().profileDir;
+    }
+    resolvePluginManager() {
+        if (this.pluginManagerOverride) {
+            return this.pluginManagerOverride;
+        }
+        try {
+            const pm = this.ctx?.get?.('pluginManager');
+            if (pm && typeof pm === 'object') {
+                return pm;
+            }
+        }
+        catch {
+            // pluginManager unavailable in headless or minimal Cordis context
+        }
+        return undefined;
+    }
+    resolveDshProfileDir() {
+        if (this.dshProfileDirOverride) {
+            return this.dshProfileDirOverride;
+        }
+        try {
+            const profileCtx = this.ctx?.get?.('profileContext');
+            if (profileCtx && typeof profileCtx.dir === 'string' && profileCtx.dir.trim()) {
+                return profileCtx.dir.trim();
+            }
+        }
+        catch {
+            // profileContext unavailable in headless or minimal Cordis context
+        }
+        return undefined;
     }
     activeSecrets(extra) {
         const secrets = [];
@@ -395,6 +505,59 @@ export class AntigravityControlService extends TypertRemoteService {
                 ? { finishedAt: this.authState.finishedAt }
                 : {}),
             ...(this.authState.error !== undefined ? { error: this.authState.error } : {}),
+        };
+    }
+    async readLocalPluginInfoSafe() {
+        try {
+            return await readInstalledPluginInfo({
+                packageRootDir: this.packageRootDir,
+                dshProfileDir: this.resolveDshProfileDir(),
+                pluginManager: this.resolvePluginManager(),
+            });
+        }
+        catch {
+            return undefined;
+        }
+    }
+    formatPluginUpdateSnapshot(localInfo, cliInstalledVersion) {
+        const pluginManager = this.resolvePluginManager();
+        const base = this.pluginUpdateState;
+        const canAutoUpdate = localInfo?.canAutoUpdate ?? typeof pluginManager?.installBundle === 'function';
+        let cliUpdateAvailable = base.cliUpdateAvailable;
+        if (base.cliLatestVersion !== undefined &&
+            cliInstalledVersion !== undefined &&
+            tryParseSemver(cliInstalledVersion) !== null) {
+            cliUpdateAvailable = compareSemver(base.cliLatestVersion, cliInstalledVersion) > 0;
+        }
+        return {
+            packageName: localInfo?.packageName ?? base.packageName,
+            currentVersion: localInfo?.currentVersion ?? base.currentVersion,
+            ...((localInfo?.currentCommit ?? base.currentCommit) !== undefined
+                ? { currentCommit: localInfo?.currentCommit ?? base.currentCommit }
+                : {}),
+            ...((localInfo?.installedSpec ?? base.installedSpec) !== undefined
+                ? { installedSpec: localInfo?.installedSpec ?? base.installedSpec }
+                : {}),
+            repoUrl: localInfo?.repoUrl ?? base.repoUrl,
+            ...(base.latestVersion !== undefined ? { latestVersion: base.latestVersion } : {}),
+            ...(base.latestCommit !== undefined ? { latestCommit: base.latestCommit } : {}),
+            ...(base.latestMessage !== undefined ? { latestMessage: base.latestMessage } : {}),
+            ...(base.latestDate !== undefined ? { latestDate: base.latestDate } : {}),
+            ...(base.commitUrl !== undefined ? { commitUrl: base.commitUrl } : {}),
+            ...(base.installSpec !== undefined ? { installSpec: base.installSpec } : {}),
+            updateAvailable: base.updateAvailable,
+            reason: base.reason,
+            canAutoUpdate,
+            ...(base.cliLatestVersion !== undefined ? { cliLatestVersion: base.cliLatestVersion } : {}),
+            ...(cliUpdateAvailable !== undefined ? { cliUpdateAvailable } : {}),
+            phase: base.phase,
+            restartRequired: base.restartRequired,
+            ...(base.restartReason !== undefined ? { restartReason: base.restartReason } : {}),
+            message: base.message,
+            ...(base.checkedAt !== undefined ? { checkedAt: base.checkedAt } : {}),
+            ...(base.startedAt !== undefined ? { startedAt: base.startedAt } : {}),
+            ...(base.finishedAt !== undefined ? { finishedAt: base.finishedAt } : {}),
+            ...(base.error !== undefined ? { error: base.error } : {}),
         };
     }
     cancelActiveAuthInternal(reasonMessage, nextPhase) {
@@ -423,9 +586,11 @@ export class AntigravityControlService extends TypertRemoteService {
         abort?.abort(new AntigravityAcpError(reasonMessage, 'ABORTED'));
     }
     async status() {
+        const localInfo = await this.readLocalPluginInfoSafe();
         const snap = await this.runtime.getStatus();
         const cfg = this.runtime.config;
         const effectiveQuota = snap.lastQuota ?? this.lastQuota;
+        const pluginUpdate = this.formatPluginUpdateSnapshot(localInfo, snap.executable?.version);
         const snapshot = {
             installed: snap.installed,
             ...(snap.executable
@@ -482,6 +647,7 @@ export class AntigravityControlService extends TypertRemoteService {
                 ...(this.installState.error !== undefined ? { error: this.installState.error } : {}),
             },
             auth: this.buildAuthSnapshot(),
+            pluginUpdate,
             models: this.models.map((m) => ({
                 id: m.id,
                 name: m.name,
@@ -904,11 +1070,444 @@ export class AntigravityControlService extends TypertRemoteService {
         }
         return await this.status();
     }
+    async checkUpdate() {
+        if (this.disposed) {
+            throw badRequest('Antigravity control service has been disposed');
+        }
+        if (this.activeUpdateTask !== null) {
+            return await this.status();
+        }
+        if (this.updateCheckTask !== null) {
+            await this.updateCheckTask.catch(() => { });
+            return await this.status();
+        }
+        const abort = new AbortController();
+        this.updateCheckAbort = abort;
+        const startedAt = new Date().toISOString();
+        this.pluginUpdateState = {
+            ...this.pluginUpdateState,
+            phase: 'checking',
+            startedAt,
+            finishedAt: undefined,
+            error: undefined,
+            message: 'Checking GitHub for plugin updates...',
+        };
+        const runCheck = async () => {
+            try {
+                const runtimeSnap = await this.runtime.getStatus().catch(() => undefined);
+                const result = await checkPluginUpdate({
+                    packageRootDir: this.packageRootDir,
+                    dshProfileDir: this.resolveDshProfileDir(),
+                    pluginManager: this.resolvePluginManager(),
+                    fetch: this.fetchImpl,
+                    signal: abort.signal,
+                    githubApiBase: this.githubApiBase,
+                    rawGithubBase: this.rawGithubBase,
+                    cliInstalledVersion: runtimeSnap?.executable?.version,
+                    cliManifestBaseUrl: this.cliManifestBaseUrl,
+                    platform: this.platform,
+                    arch: this.arch,
+                    musl: this.musl,
+                });
+                if (this.updateCheckAbort !== abort || this.disposed) {
+                    return;
+                }
+                this.lastCheckResult = result;
+                this.pluginUpdateState = {
+                    packageName: result.packageName,
+                    currentVersion: result.currentVersion,
+                    ...(result.currentCommit !== undefined ? { currentCommit: result.currentCommit } : {}),
+                    ...(result.installedSpec !== undefined ? { installedSpec: result.installedSpec } : {}),
+                    repoUrl: result.repoUrl,
+                    ...(result.latestVersion !== undefined ? { latestVersion: result.latestVersion } : {}),
+                    ...(result.latestCommit !== undefined ? { latestCommit: result.latestCommit } : {}),
+                    ...(result.latestMessage !== undefined ? { latestMessage: result.latestMessage } : {}),
+                    ...(result.latestDate !== undefined ? { latestDate: result.latestDate } : {}),
+                    ...(result.commitUrl !== undefined ? { commitUrl: result.commitUrl } : {}),
+                    installSpec: result.installSpec,
+                    updateAvailable: result.updateAvailable,
+                    reason: result.reason,
+                    canAutoUpdate: result.canAutoUpdate,
+                    ...(result.cliLatestVersion !== undefined
+                        ? { cliLatestVersion: result.cliLatestVersion }
+                        : {}),
+                    ...(result.cliUpdateAvailable !== undefined
+                        ? { cliUpdateAvailable: result.cliUpdateAvailable }
+                        : {}),
+                    phase: 'idle',
+                    restartRequired: this.pluginUpdateState.restartRequired,
+                    ...(this.pluginUpdateState.restartReason !== undefined
+                        ? { restartReason: this.pluginUpdateState.restartReason }
+                        : {}),
+                    message: buildUpdateCheckMessage(result),
+                    checkedAt: result.checkedAt,
+                    startedAt,
+                    finishedAt: new Date().toISOString(),
+                };
+            }
+            catch (error) {
+                if (this.updateCheckAbort !== abort || this.disposed) {
+                    return;
+                }
+                const isAborted = abort.signal.aborted ||
+                    (error instanceof AntigravityAcpError && error.code === 'ABORTED');
+                const safeErr = sanitizeControlError(error, this.activeSecrets());
+                this.pluginUpdateState = {
+                    ...this.pluginUpdateState,
+                    phase: isAborted ? 'cancelled' : 'failed',
+                    message: isAborted ? 'Update check cancelled' : safeErr,
+                    startedAt,
+                    finishedAt: new Date().toISOString(),
+                    ...(!isAborted ? { error: safeErr } : {}),
+                };
+            }
+            finally {
+                if (this.updateCheckAbort === abort) {
+                    this.updateCheckAbort = null;
+                }
+            }
+        };
+        const task = runCheck().finally(() => {
+            if (this.updateCheckTask === task) {
+                this.updateCheckTask = null;
+            }
+        });
+        this.updateCheckTask = task;
+        await task;
+        return await this.status();
+    }
+    async updatePlugin(input) {
+        const parsed = parseUpdatePluginInput(input);
+        if (this.disposed) {
+            throw badRequest('Antigravity control service has been disposed');
+        }
+        if (this.activeUpdateTask !== null) {
+            return await this.status();
+        }
+        if (this.updateCheckAbort !== null) {
+            const checkAbort = this.updateCheckAbort;
+            this.updateCheckAbort = null;
+            checkAbort.abort(new AntigravityAcpError('Superseded by plugin update', 'ABORTED'));
+        }
+        const pluginManager = this.resolvePluginManager();
+        const dshProfileDir = this.resolveDshProfileDir();
+        const info = await readInstalledPluginInfo({
+            packageRootDir: this.packageRootDir,
+            dshProfileDir,
+            pluginManager,
+        });
+        let validatedTargetSpec;
+        if (parsed?.targetSpec !== undefined) {
+            try {
+                validatedTargetSpec = validatePluginUpdateSpec(parsed.targetSpec, info.owner, info.repo);
+            }
+            catch (error) {
+                throw badRequest(sanitizeControlError(error, this.activeSecrets()));
+            }
+        }
+        const startedAt = new Date().toISOString();
+        const requestId = `agp-update-${crypto.randomUUID()}`;
+        this.activeUpdateRequestId = requestId;
+        this.pluginUpdateState = {
+            ...this.pluginUpdateState,
+            packageName: info.packageName,
+            currentVersion: info.currentVersion,
+            ...(info.currentCommit !== undefined ? { currentCommit: info.currentCommit } : {}),
+            ...(info.installedSpec !== undefined ? { installedSpec: info.installedSpec } : {}),
+            repoUrl: info.repoUrl,
+            canAutoUpdate: info.canAutoUpdate,
+            phase: 'updating',
+            restartRequired: false,
+            restartReason: undefined,
+            error: undefined,
+            startedAt,
+            finishedAt: undefined,
+            message: 'Preparing plugin update...',
+        };
+        const runUpdate = async () => {
+            let unsubscribeProgress;
+            try {
+                let targetSpec = validatedTargetSpec;
+                if (!targetSpec) {
+                    this.pluginUpdateState = {
+                        ...this.pluginUpdateState,
+                        phase: 'updating',
+                        message: 'Checking latest release on GitHub before updating...',
+                    };
+                    const runtimeSnap = await this.runtime.getStatus().catch(() => undefined);
+                    const checked = await checkPluginUpdate({
+                        packageRootDir: this.packageRootDir,
+                        dshProfileDir: this.resolveDshProfileDir(),
+                        pluginManager: this.resolvePluginManager(),
+                        fetch: this.fetchImpl,
+                        githubApiBase: this.githubApiBase,
+                        rawGithubBase: this.rawGithubBase,
+                        cliInstalledVersion: runtimeSnap?.executable?.version,
+                        cliManifestBaseUrl: this.cliManifestBaseUrl,
+                        platform: this.platform,
+                        arch: this.arch,
+                        musl: this.musl,
+                    });
+                    if (this.disposed) {
+                        return;
+                    }
+                    this.lastCheckResult = checked;
+                    this.pluginUpdateState = {
+                        ...this.pluginUpdateState,
+                        packageName: checked.packageName,
+                        currentVersion: checked.currentVersion,
+                        ...(checked.currentCommit !== undefined
+                            ? { currentCommit: checked.currentCommit }
+                            : {}),
+                        ...(checked.installedSpec !== undefined
+                            ? { installedSpec: checked.installedSpec }
+                            : {}),
+                        repoUrl: checked.repoUrl,
+                        ...(checked.latestVersion !== undefined
+                            ? { latestVersion: checked.latestVersion }
+                            : {}),
+                        ...(checked.latestCommit !== undefined ? { latestCommit: checked.latestCommit } : {}),
+                        ...(checked.latestMessage !== undefined
+                            ? { latestMessage: checked.latestMessage }
+                            : {}),
+                        ...(checked.latestDate !== undefined ? { latestDate: checked.latestDate } : {}),
+                        ...(checked.commitUrl !== undefined ? { commitUrl: checked.commitUrl } : {}),
+                        installSpec: checked.installSpec,
+                        updateAvailable: checked.updateAvailable,
+                        reason: checked.reason,
+                        canAutoUpdate: checked.canAutoUpdate,
+                        ...(checked.cliLatestVersion !== undefined
+                            ? { cliLatestVersion: checked.cliLatestVersion }
+                            : {}),
+                        ...(checked.cliUpdateAvailable !== undefined
+                            ? { cliUpdateAvailable: checked.cliUpdateAvailable }
+                            : {}),
+                        checkedAt: checked.checkedAt,
+                    };
+                    if (!checked.updateAvailable && parsed?.force !== true) {
+                        this.pluginUpdateState = {
+                            ...this.pluginUpdateState,
+                            phase: 'succeeded',
+                            restartRequired: false,
+                            finishedAt: new Date().toISOString(),
+                            error: undefined,
+                            message: buildUpdateCheckMessage(checked),
+                        };
+                        return;
+                    }
+                    targetSpec = checked.installSpec;
+                }
+                const currentInfo = await readInstalledPluginInfo({
+                    packageRootDir: this.packageRootDir,
+                    dshProfileDir: this.resolveDshProfileDir(),
+                    pluginManager: this.resolvePluginManager(),
+                });
+                if (parsed?.force === true &&
+                    currentInfo.installedSpec !== undefined &&
+                    currentInfo.installedSpec === targetSpec) {
+                    targetSpec = toggleGithubSpecFormat(targetSpec, currentInfo.owner, currentInfo.repo);
+                }
+                const ctxLike = this.ctx;
+                unsubscribeProgress = ctxLike.on?.('plugin-manager/install-state', (payload) => {
+                    if (this.disposed ||
+                        this.activeUpdateRequestId !== requestId ||
+                        typeof payload !== 'object' ||
+                        payload === null) {
+                        return;
+                    }
+                    const ev = payload;
+                    if (ev.requestId !== requestId) {
+                        return;
+                    }
+                    if (ev.phase === 'installing') {
+                        this.pluginUpdateState = {
+                            ...this.pluginUpdateState,
+                            phase: 'updating',
+                            message: 'Installing updated plugin bundle via DSH package manager...',
+                        };
+                    }
+                    else if (ev.phase === 'applying') {
+                        this.pluginUpdateState = {
+                            ...this.pluginUpdateState,
+                            phase: 'updating',
+                            message: 'Applying updated plugin bundle...',
+                        };
+                    }
+                    else if (ev.phase === 'cancelling') {
+                        this.pluginUpdateState = {
+                            ...this.pluginUpdateState,
+                            message: 'Cancelling plugin update...',
+                        };
+                    }
+                });
+                this.pluginUpdateState = {
+                    ...this.pluginUpdateState,
+                    phase: 'updating',
+                    installSpec: targetSpec,
+                    message: `Updating plugin from ${targetSpec}...`,
+                };
+                const applyResult = await applyPluginUpdate({
+                    installSpec: targetSpec,
+                    requestId,
+                    owner: currentInfo.owner,
+                    repo: currentInfo.repo,
+                    pluginManager: this.resolvePluginManager(),
+                });
+                if (this.disposed) {
+                    return;
+                }
+                if (applyResult.status === 'cancelled') {
+                    this.pluginUpdateState = {
+                        ...this.pluginUpdateState,
+                        phase: 'cancelled',
+                        restartRequired: false,
+                        finishedAt: new Date().toISOString(),
+                        error: undefined,
+                        message: applyResult.message,
+                    };
+                    return;
+                }
+                if (applyResult.status === 'failed') {
+                    const safeErr = sanitizeControlError(applyResult.error ?? applyResult.message, this.activeSecrets());
+                    this.pluginUpdateState = {
+                        ...this.pluginUpdateState,
+                        phase: 'failed',
+                        restartRequired: false,
+                        finishedAt: new Date().toISOString(),
+                        error: safeErr,
+                        message: safeErr,
+                    };
+                    return;
+                }
+                const refreshedInfo = await readInstalledPluginInfo({
+                    packageRootDir: this.packageRootDir,
+                    dshProfileDir: this.resolveDshProfileDir(),
+                    pluginManager: this.resolvePluginManager(),
+                }).catch(() => undefined);
+                const nextCommit = refreshedInfo?.currentCommit ??
+                    this.pluginUpdateState.latestCommit ??
+                    this.pluginUpdateState.currentCommit;
+                const nextVersion = applyResult.installedVersion ??
+                    refreshedInfo?.currentVersion ??
+                    this.pluginUpdateState.currentVersion;
+                this.pluginUpdateState = {
+                    ...this.pluginUpdateState,
+                    currentVersion: nextVersion,
+                    ...(nextCommit !== undefined ? { currentCommit: nextCommit } : {}),
+                    installedSpec: refreshedInfo?.installedSpec ?? applyResult.installSpec,
+                    updateAvailable: false,
+                    reason: 'up-to-date',
+                    phase: 'succeeded',
+                    restartRequired: applyResult.restartRequired,
+                    ...(applyResult.restartReason !== undefined
+                        ? { restartReason: applyResult.restartReason }
+                        : {}),
+                    finishedAt: new Date().toISOString(),
+                    error: undefined,
+                    message: applyResult.message,
+                };
+            }
+            catch (error) {
+                if (this.disposed) {
+                    return;
+                }
+                const safeErr = sanitizeControlError(error, this.activeSecrets());
+                this.pluginUpdateState = {
+                    ...this.pluginUpdateState,
+                    phase: 'failed',
+                    restartRequired: false,
+                    finishedAt: new Date().toISOString(),
+                    error: safeErr,
+                    message: safeErr,
+                };
+            }
+            finally {
+                try {
+                    unsubscribeProgress?.();
+                }
+                catch {
+                    // Ignore unsubscribe failure
+                }
+                if (this.activeUpdateRequestId === requestId) {
+                    this.activeUpdateRequestId = null;
+                }
+            }
+        };
+        const task = runUpdate().finally(() => {
+            if (this.activeUpdateTask === task) {
+                this.activeUpdateTask = null;
+            }
+        });
+        this.activeUpdateTask = task;
+        await Promise.race([
+            task,
+            new Promise((resolve) => {
+                const timer = setTimeout(resolve, 20);
+                timer.unref?.();
+            }),
+        ]);
+        return await this.status();
+    }
+    async cancelPluginUpdate() {
+        if (this.disposed) {
+            throw badRequest('Antigravity control service has been disposed');
+        }
+        if (this.updateCheckAbort !== null) {
+            const checkAbort = this.updateCheckAbort;
+            const startedAt = this.pluginUpdateState.startedAt;
+            this.updateCheckAbort = null;
+            this.pluginUpdateState = {
+                ...this.pluginUpdateState,
+                phase: 'cancelled',
+                message: 'Update check cancelled',
+                ...(startedAt !== undefined ? { startedAt } : {}),
+                finishedAt: new Date().toISOString(),
+                error: undefined,
+            };
+            checkAbort.abort(new AntigravityAcpError('Update check cancelled', 'ABORTED'));
+        }
+        const requestId = this.activeUpdateRequestId;
+        if (requestId !== null) {
+            const pm = this.resolvePluginManager();
+            const cancelRes = await pm?.cancelInstall?.(requestId).catch(() => undefined);
+            if (cancelRes?.status === 'too-late') {
+                if (this.pluginUpdateState.phase === 'updating') {
+                    this.pluginUpdateState = {
+                        ...this.pluginUpdateState,
+                        message: 'Update is already being applied and cannot be cancelled now.',
+                    };
+                }
+            }
+            else {
+                if (this.activeUpdateTask !== null) {
+                    await this.activeUpdateTask.catch(() => { });
+                }
+                if (this.pluginUpdateState.phase === 'updating') {
+                    this.pluginUpdateState = {
+                        ...this.pluginUpdateState,
+                        phase: 'cancelled',
+                        restartRequired: false,
+                        finishedAt: new Date().toISOString(),
+                        error: undefined,
+                        message: 'Plugin update cancelled',
+                    };
+                }
+            }
+        }
+        return await this.status();
+    }
     dispose() {
         if (this.disposed) {
             return;
         }
         this.disposed = true;
+        // Abort in-flight GitHub HTTP checks only; never call pluginManager.cancelInstall
+        // here because HMR disposes this old service while applying the updated bundle.
+        if (this.updateCheckAbort !== null) {
+            const checkAbort = this.updateCheckAbort;
+            this.updateCheckAbort = null;
+            checkAbort.abort(new AntigravityAcpError('Control service disposed', 'ABORTED'));
+        }
         if (this.installAbort !== null) {
             const installAbort = this.installAbort;
             this.installAbort = null;

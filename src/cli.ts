@@ -29,6 +29,7 @@ import {
 import { AntigravityAcpError, redactSensitiveText } from './shared/errors.js';
 import { validateProxyUrl } from './runtime/profile.js';
 import { MINIMUM_AGY_VERSION, compareSemver } from './runtime/release.js';
+import { checkPluginUpdate } from './runtime/updater.js';
 import { createAntigravityRuntimeService } from './index.js';
 
 const SENSITIVE_PARENT_ENV_RE =
@@ -562,6 +563,7 @@ export function renderCliHelp(): string {
     '  logout                 Clear stored OAuth credentials and recycle runtime workers',
     '  models                 List discovered Antigravity models and thinking levels',
     '  quota                  Probe account quota summary via Cloud Code Assist',
+    '  check-update           Check GitHub and Antigravity CLI manifest for updates',
     '  doctor                 Run environment, binary, auth, proxy, and ACP diagnostics',
     '  help, --help           Show this help text',
     '',
@@ -800,6 +802,42 @@ export async function runCli(
                   : 'unknown';
             const reset = window.resetAt ? ` (resets ${window.resetAt})` : '';
             io.stdout(`  - ${window.label ?? window.id}: ${pct}${reset}`);
+          }
+        }
+        return 0;
+      }
+
+      case 'check-update': {
+        const statusSnap = await runtime.getStatus();
+        const update = await checkPluginUpdate({
+          cliInstalledVersion: statusSnap.executable?.version,
+        });
+        if (parsed.json) {
+          io.stdout(JSON.stringify(update, null, 2));
+        } else {
+          io.stdout(
+            `Plugin: ${update.packageName} v${update.currentVersion}${update.currentCommit ? ` (${update.currentCommit.slice(0, 7)})` : ''}`,
+          );
+          io.stdout(
+            `Latest (${update.branch}): ${update.latestVersion ? `v${update.latestVersion}` : 'unknown'}${update.latestCommit ? ` (${update.latestCommit.slice(0, 7)})` : ''}`,
+          );
+          if (update.latestMessage) {
+            io.stdout(
+              `Latest Commit: ${update.latestMessage}${update.latestDate ? ` (${update.latestDate})` : ''}`,
+            );
+          }
+          if (update.updateAvailable) {
+            io.stdout(
+              `Update available (${update.reason}). Run: dsh plugin --profile web add ${update.installSpec}`,
+            );
+          } else {
+            io.stdout(`Status: up to date (${update.reason})`);
+          }
+          if (update.cliLatestVersion) {
+            const installedCli = statusSnap.executable?.version;
+            io.stdout(
+              `Antigravity CLI: ${installedCli ? `v${installedCli}` : 'not installed'} / latest v${update.cliLatestVersion}${update.cliUpdateAvailable ? ' (update available)' : ''}`,
+            );
           }
         }
         return 0;

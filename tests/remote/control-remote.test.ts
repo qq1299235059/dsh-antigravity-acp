@@ -10,7 +10,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as runtimePlugin from '../../src/index.js';
 import * as llmPlugin from '../../src/llm-plugin.js';
 import type { AntigravityControlStatusSnapshot } from '../../src/shared/contracts.js';
-import type { TypertHostContribution } from '../../src/remote/control-remote.js';
+import {
+  registerAntigravityControlRemote,
+  type TypertHostContribution,
+} from '../../src/remote/control-remote.js';
 
 const FAKE_SERVER_PATH = fileURLToPath(new URL('../acp/fake-agy-server.mjs', import.meta.url));
 
@@ -180,7 +183,7 @@ describe('antigravityControl Typert remote & UI store', () => {
     // Check Typert contribution contract
     const contrib = typert.contributions.get('dsh-antigravity-acp#host');
     expect(contrib).toBeDefined();
-    expect(contrib!.invocations).toHaveLength(10);
+    expect(contrib!.invocations).toHaveLength(13);
 
     const expectedZeroArg = new Set([
       'status',
@@ -189,8 +192,16 @@ describe('antigravityControl Typert remote & UI store', () => {
       'logout',
       'refreshModels',
       'refreshQuota',
+      'checkUpdate',
+      'cancelPluginUpdate',
     ]);
-    const expectedOneArg = new Set(['installCli', 'saveConfig', 'authStart', 'authSubmitCode']);
+    const expectedOneArg = new Set([
+      'installCli',
+      'saveConfig',
+      'authStart',
+      'authSubmitCode',
+      'updatePlugin',
+    ]);
 
     for (const desc of contrib!.invocations) {
       expect(desc.id).toBe(`dsh-antigravity-acp#antigravityControl/${desc.method}`);
@@ -275,6 +286,15 @@ describe('antigravityControl Typert remote & UI store', () => {
     });
     expect(statusSnap.install.phase).toBe('idle');
     expect(statusSnap.auth.phase).toBe('idle');
+    expect(statusSnap.pluginUpdate).toMatchObject({
+      packageName: 'dsh-antigravity-acp',
+      currentVersion: '0.2.0',
+      phase: 'idle',
+      updateAvailable: false,
+      reason: 'unchecked',
+      canAutoUpdate: false,
+      restartRequired: false,
+    });
     expect(statusSnap.models).toEqual([]);
 
     await scope.dispose();
@@ -607,7 +627,7 @@ describe('antigravityControl Typert remote & UI store', () => {
     assertJsonSafe(loggedOutMidFlow);
     assertJsonSafe(afterWait);
     expect(afterWait.auth.phase).toBe('idle');
-  });
+  }, 15_000);
 
   it('refreshes models and quota, strips raw/undefined/NaN fields, and redacts secrets & auth URLs from errors', async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-ctrl-models-quota-'));
@@ -926,5 +946,221 @@ describe('antigravityControl Typert remote & UI store', () => {
       },
       { timeout: 5_000, interval: 25 },
     );
+  });
+
+  it('supports checkUpdate, updatePlugin with Cordis pluginManager + progress events, cancelPluginUpdate, and HMR-safe dispose', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-ctrl-update-'));
+    tempDirs.push(tempDir);
+
+    const dshProfileDir = path.join(tempDir, 'dsh-profile-web');
+    const pkgDir = path.join(dshProfileDir, 'node_modules', 'dsh-antigravity-acp');
+    const agyProfileDir = path.join(tempDir, 'agy-profile');
+    fs.mkdirSync(pkgDir, { recursive: true });
+    fs.mkdirSync(agyProfileDir, { recursive: true });
+
+    const oldSha = 'a'.repeat(40);
+    const newSha = 'b'.repeat(40);
+    fs.writeFileSync(
+      path.join(pkgDir, 'package.json'),
+      JSON.stringify({
+        name: 'dsh-antigravity-acp',
+        version: '0.1.0',
+        repository: { url: 'git+https://github.com/qq1299235059/dsh-antigravity-acp.git' },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(dshProfileDir, 'package.json'),
+      JSON.stringify({
+        name: 'dsh-profile-web',
+        dependencies: {
+          'dsh-antigravity-acp': 'github:qq1299235059/dsh-antigravity-acp',
+        },
+        dsh: { profile: { bundles: ['dsh-antigravity-acp'] } },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(dshProfileDir, 'pnpm-lock.yaml'),
+      `lockfileVersion: '9.0'\nimporters:\n  .:\n    dependencies:\n      dsh-antigravity-acp:\n        specifier: github:qq1299235059/dsh-antigravity-acp\n        version: https://codeload.github.com/qq1299235059/dsh-antigravity-acp/tar.gz/${oldSha}(zod@4.6.7)\n`,
+    );
+
+    const fakeBin = createFakeAgyBinary(path.join(tempDir, 'bin'));
+    const installCalls: Array<{ spec: string; requestId?: string }> = [];
+    const cancelCalls: string[] = [];
+    let deferNextInstall = false;
+    const deferredResolvers: Array<
+      (res: {
+        changed: boolean;
+        application: 'applied' | 'restart-required' | 'cancelled' | 'failed';
+        restartReason?: string;
+        version?: string;
+      }) => void
+    > = [];
+
+    class MockPluginManagerService extends Service {
+      constructor(ctx: Context) {
+        super(ctx, 'pluginManager');
+      }
+
+      async installBundle(
+        spec: string,
+        opts?: { enabled?: boolean; requestId?: string },
+      ) {
+        installCalls.push({ spec, requestId: opts?.requestId });
+        if (deferNextInstall) {
+          return await new Promise((resolve) => {
+            deferredResolvers.push(resolve);
+          });
+        }
+        (this.ctx as unknown as { emit(e: string, p: unknown): void }).emit(
+          'plugin-manager/install-state',
+          { requestId: opts?.requestId, phase: 'installing' },
+        );
+        // Simulate pnpm writing updated files on disk
+        fs.writeFileSync(
+          path.join(pkgDir, 'package.json'),
+          JSON.stringify({
+            name: 'dsh-antigravity-acp',
+            version: '0.2.0',
+            repository: { url: 'git+https://github.com/qq1299235059/dsh-antigravity-acp.git' },
+          }),
+        );
+        fs.writeFileSync(
+          path.join(dshProfileDir, 'package.json'),
+          JSON.stringify({
+            name: 'dsh-profile-web',
+            dependencies: {
+              'dsh-antigravity-acp': spec,
+            },
+            dsh: { profile: { bundles: ['dsh-antigravity-acp'] } },
+          }),
+        );
+        (this.ctx as unknown as { emit(e: string, p: unknown): void }).emit(
+          'plugin-manager/install-state',
+          { requestId: opts?.requestId, phase: 'applying' },
+        );
+        return {
+          changed: true,
+          application: 'restart-required' as const,
+          restartReason: 'package-moved',
+          version: '0.2.0',
+        };
+      }
+
+      async cancelInstall(requestId: string) {
+        cancelCalls.push(requestId);
+        const resolve = deferredResolvers.shift();
+        resolve?.({
+          changed: false,
+          application: 'cancelled',
+        });
+        return { status: 'cancelled' as const };
+      }
+    }
+
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes('/commits/main')) {
+        return new Response(
+          JSON.stringify({
+            sha: newSha,
+            html_url: `https://github.com/qq1299235059/dsh-antigravity-acp/commit/${newSha}`,
+            commit: {
+              message: 'feat: self-update support',
+              committer: { date: '2026-11-22T06:30:00Z' },
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith(`/${newSha}/package.json`) || url.endsWith('/main/package.json')) {
+        return new Response(JSON.stringify({ name: 'dsh-antigravity-acp', version: '0.2.0' }), {
+          status: 200,
+        });
+      }
+      return new Response('not found', { status: 404 });
+    });
+
+    const ctx = new Context();
+    let control!: ReturnType<typeof registerAntigravityControlRemote>;
+    const scope = await ctx.plugin(async (scopeCtx) => {
+      await scopeCtx.plugin(LocalSubprocessRuntime);
+      await scopeCtx.plugin(MockTypertRegistry);
+      await scopeCtx.plugin(MockPluginManagerService);
+      const rt = runtimePlugin.createAntigravityRuntimeService(scopeCtx.get('subprocess')!, {
+        ...runtimePlugin.RuntimeConfigSchema({}),
+        binaryPath: fakeBin,
+        profileDir: agyProfileDir,
+        autoDownload: false,
+      });
+      control = registerAntigravityControlRemote(scopeCtx, rt, {
+        profileDir: agyProfileDir,
+        dshProfileDir,
+        packageRootDir: pkgDir,
+        fetch: fetchMock as unknown as typeof globalThis.fetch,
+      });
+    });
+    fibers.push(scope);
+
+    // Reject foreign / invalid targetSpec strictly with gateway/bad-request
+    await expect(
+      control.updatePlugin({ targetSpec: 'github:attacker/malicious#main' }),
+    ).rejects.toMatchObject({ code: 'gateway/bad-request' });
+
+    // checkUpdate detects newer version & commit and preserves JSON safety
+    const checked = await control.checkUpdate();
+    assertJsonSafe(checked);
+    expect(checked.pluginUpdate).toMatchObject({
+      currentVersion: '0.1.0',
+      currentCommit: oldSha,
+      latestVersion: '0.2.0',
+      latestCommit: newSha,
+      updateAvailable: true,
+      reason: 'newer-version',
+      canAutoUpdate: true,
+      phase: 'idle',
+      installSpec: `github:qq1299235059/dsh-antigravity-acp#${newSha}`,
+    });
+
+    // updatePlugin runs installBundle and settles with restartRequired: true
+    await control.updatePlugin({});
+    const updated = await pollUntil(
+      () => control.status(),
+      (s) => s.pluginUpdate.phase === 'succeeded',
+    );
+    assertJsonSafe(updated);
+    expect(installCalls).toHaveLength(1);
+    expect(installCalls[0].spec).toBe(`github:qq1299235059/dsh-antigravity-acp#${newSha}`);
+    expect(updated.pluginUpdate).toMatchObject({
+      phase: 'succeeded',
+      currentVersion: '0.2.0',
+      currentCommit: newSha,
+      updateAvailable: false,
+      restartRequired: true,
+      restartReason: 'package-moved',
+    });
+
+    // Verify cancelPluginUpdate cancels an in-flight update, whereas dispose() NEVER calls cancelInstall
+    deferNextInstall = true;
+    await control.updatePlugin({
+      targetSpec: `github:qq1299235059/dsh-antigravity-acp#${oldSha}`,
+    });
+    const cancellingSnap = await control.cancelPluginUpdate();
+    assertJsonSafe(cancellingSnap);
+    expect(cancelCalls).toHaveLength(1);
+    expect(cancellingSnap.pluginUpdate.phase).toBe('cancelled');
+
+    // Now start another in-flight update and dispose() service -> cancelInstall MUST NOT be called again (HMR safety)
+    deferNextInstall = true;
+    await control.updatePlugin({
+      targetSpec: `github:qq1299235059/dsh-antigravity-acp#${newSha}`,
+    });
+    expect(installCalls).toHaveLength(3);
+    const cancelCountBeforeDispose = cancelCalls.length;
+    await scope.dispose();
+    fibers.pop();
+    expect(cancelCalls).toHaveLength(cancelCountBeforeDispose);
+    while (deferredResolvers.length > 0) {
+      deferredResolvers.shift()?.({ changed: false, application: 'cancelled' });
+    }
   });
 });

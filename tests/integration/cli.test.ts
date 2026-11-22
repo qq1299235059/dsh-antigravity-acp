@@ -2,8 +2,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
-import { parseCliArgs, runCli } from '../../src/cli.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { parseCliArgs, renderCliHelp, runCli } from '../../src/cli.js';
 
 const FAKE_SERVER_PATH = fileURLToPath(new URL('../acp/fake-agy-server.mjs', import.meta.url));
 
@@ -197,5 +197,65 @@ describe('standalone CLI (src/cli.ts)', () => {
     );
     expect(code2).toBe(1);
     expect(out2.join('\n')).not.toContain('secret');
+  });
+
+  it('supports check-update CLI command (--json and text output) and documents it in help', async () => {
+    expect(renderCliHelp()).toContain('check-update');
+
+    const newSha = 'd'.repeat(40);
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes('/commits/main')) {
+        return new Response(
+          JSON.stringify({
+            sha: newSha,
+            commit: {
+              message: 'release: v9.9.9',
+              committer: { date: '2026-11-22T06:40:00Z' },
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.includes('package.json')) {
+        return new Response(JSON.stringify({ version: '9.9.9' }), { status: 200 });
+      }
+      return new Response('not found', { status: 404 });
+    });
+
+    try {
+      const outJson: string[] = [];
+      const errJson: string[] = [];
+      const codeJson = await runCli(['check-update', '--no-auto-download', '--json'], {
+        stdout: (line) => outJson.push(line),
+        stderr: (line) => errJson.push(line),
+        readLine: async () => '',
+      });
+      expect(errJson).toEqual([]);
+      expect(codeJson).toBe(0);
+      const parsed = JSON.parse(outJson.join('\n')) as {
+        packageName: string;
+        currentVersion: string;
+        latestVersion: string;
+        updateAvailable: boolean;
+      };
+      expect(parsed.packageName).toBe('dsh-antigravity-acp');
+      expect(parsed.currentVersion).toBe('0.2.0');
+      expect(parsed.latestVersion).toBe('9.9.9');
+      expect(parsed.updateAvailable).toBe(true);
+
+      const outText: string[] = [];
+      const codeText = await runCli(['check-update', '--no-auto-download'], {
+        stdout: (line) => outText.push(line),
+        stderr: () => {},
+        readLine: async () => '',
+      });
+      expect(codeText).toBe(0);
+      const text = outText.join('\n');
+      expect(text).toContain('v9.9.9');
+      expect(text).toContain(`dsh plugin --profile web add github:qq1299235059/dsh-antigravity-acp#${newSha}`);
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 });

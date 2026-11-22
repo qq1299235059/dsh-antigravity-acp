@@ -21,6 +21,8 @@ window.__ModuleLoader__.load({
       'logout',
       'refreshModels',
       'refreshQuota',
+      'checkUpdate',
+      'cancelPluginUpdate',
     ];
 
     const ONE_ARG_METHODS = [
@@ -28,6 +30,7 @@ window.__ModuleLoader__.load({
       'saveConfig',
       'authStart',
       'authSubmitCode',
+      'updatePlugin',
     ];
 
     const ZERO_ARG_SET = new Set(ZERO_ARG_METHODS);
@@ -414,6 +417,33 @@ window.__ModuleLoader__.load({
       subtitle: '安装与管理 Antigravity CLI (agy >= 1.5.0)，配置 OAuth / API Key 鉴权并查看模型与配额。',
       refreshStatus: '刷新状态',
       loading: '正在加载 Antigravity ACP 状态…',
+      pluginTitle: '插件版本与更新',
+      pluginStatusUnchecked: '未检查',
+      pluginStatusUpToDate: '已是最新',
+      pluginStatusAvailable: '发现新版本',
+      pluginStatusAhead: '本地版本超前',
+      pluginStatusChecking: '检查中',
+      pluginStatusUpdating: '更新中',
+      pluginStatusRestart: '需重启生效',
+      pluginStatusUpdated: '更新完成',
+      pluginStatusFailed: '操作失败',
+      fieldCurrentPluginVersion: '当前版本',
+      fieldLatestPluginVersion: '最新版本',
+      fieldLatestCommitNote: '最新提交',
+      fieldCheckedAt: '上次检查',
+      checkUpdateBtn: '检查更新',
+      updatePluginBtn: '立即更新',
+      reinstallLatestBtn: '同步最新提交',
+      cancelUpdateBtn: '取消更新',
+      githubRepoLink: 'GitHub 仓库',
+      restartRequiredBanner: '插件文件已更新完成，请完全退出并重启 DeepSeek Harness (DSH) 以加载新版本。',
+      manualUpdateHint: '当前环境未挂载 DSH 插件管理器，无法自动热更新，请运行以下命令升级：',
+      pluginUpToDateNotice: '插件检查完成：当前已是最新版本。',
+      pluginUpdateFoundNotice: '发现插件新版本，可点击“立即更新”升级。',
+      pluginUpdatedNotice: '插件更新已完成。',
+      pluginUpdatedReloadedNotice: '插件已更新并完成热重载。',
+      cliNewVersionBadgePrefix: '有新版 v',
+      cliNewVersionBadgeSuffix: '',
       cliTitle: 'Antigravity CLI 运行时',
       statusInstalled: '已安装',
       statusInstalling: '安装中',
@@ -498,6 +528,33 @@ window.__ModuleLoader__.load({
       subtitle: 'Install and manage Antigravity CLI (agy >= 1.5.0), configure OAuth / API Key auth, and inspect models & quota.',
       refreshStatus: 'Refresh',
       loading: 'Loading Antigravity ACP status…',
+      pluginTitle: 'Plugin Version & Updates',
+      pluginStatusUnchecked: 'Not Checked',
+      pluginStatusUpToDate: 'Up to Date',
+      pluginStatusAvailable: 'Update Available',
+      pluginStatusAhead: 'Ahead of Remote',
+      pluginStatusChecking: 'Checking',
+      pluginStatusUpdating: 'Updating',
+      pluginStatusRestart: 'Restart Required',
+      pluginStatusUpdated: 'Updated',
+      pluginStatusFailed: 'Failed',
+      fieldCurrentPluginVersion: 'Current Version',
+      fieldLatestPluginVersion: 'Latest Version',
+      fieldLatestCommitNote: 'Latest Commit',
+      fieldCheckedAt: 'Last Checked',
+      checkUpdateBtn: 'Check for Updates',
+      updatePluginBtn: 'Update Plugin',
+      reinstallLatestBtn: 'Sync Latest Commit',
+      cancelUpdateBtn: 'Cancel Update',
+      githubRepoLink: 'GitHub',
+      restartRequiredBanner: 'Plugin updated on disk. Please quit and restart DeepSeek Harness (DSH) to load the new version.',
+      manualUpdateHint: 'DSH plugin manager is unavailable here. Run this command in your terminal to update:',
+      pluginUpToDateNotice: 'Plugin check completed: already up to date.',
+      pluginUpdateFoundNotice: 'A new plugin version is available. Click "Update Plugin" to install.',
+      pluginUpdatedNotice: 'Plugin update completed.',
+      pluginUpdatedReloadedNotice: 'Plugin updated and reloaded.',
+      cliNewVersionBadgePrefix: 'Update v',
+      cliNewVersionBadgeSuffix: '',
       cliTitle: 'CLI Runtime & Installation',
       statusInstalled: 'Installed',
       statusInstalling: 'Installing',
@@ -706,10 +763,36 @@ window.__ModuleLoader__.load({
       const initializedRef = React.useRef(false);
       const runtimeDirtyRef = React.useRef(false);
       const authDirtyRef = React.useRef(false);
+      const pluginUpdateTrackRef = React.useRef({
+        wasUpdating: false,
+        version: '',
+        commit: '',
+      });
 
       const applyStatusSnapshot = React.useCallback((nextStatus) => {
         if (!nextStatus || typeof nextStatus !== 'object') {
           return;
+        }
+        const pu = nextStatus.pluginUpdate;
+        if (pu && typeof pu === 'object') {
+          const prev = pluginUpdateTrackRef.current;
+          const ver = typeof pu.currentVersion === 'string' ? pu.currentVersion : '';
+          const commit = typeof pu.currentCommit === 'string' ? pu.currentCommit : '';
+          if (pu.phase === 'updating') {
+            pluginUpdateTrackRef.current = {
+              wasUpdating: true,
+              version: prev.wasUpdating && prev.version ? prev.version : ver,
+              commit: prev.wasUpdating && prev.commit ? prev.commit : commit,
+            };
+          } else if (prev.wasUpdating) {
+            if (pu.phase === 'idle' && (ver !== prev.version || commit !== prev.commit)) {
+              setActionError(null);
+              setActionNotice(getCopy().pluginUpdatedReloadedNotice);
+            }
+            pluginUpdateTrackRef.current = { wasUpdating: false, version: ver, commit };
+          } else {
+            pluginUpdateTrackRef.current = { wasUpdating: false, version: ver, commit };
+          }
         }
         setStatus(nextStatus);
         const cfg = nextStatus.config;
@@ -764,9 +847,13 @@ window.__ModuleLoader__.load({
 
       const installPhase = status && status.install ? status.install.phase : 'idle';
       const authPhase = status && status.auth ? status.auth.phase : 'idle';
+      const pluginUpdateState = status && status.pluginUpdate ? status.pluginUpdate : null;
+      const pluginUpdatePhase = pluginUpdateState ? pluginUpdateState.phase : 'idle';
       const isInstalling = installPhase === 'running';
       const isAuthActive = ACTIVE_AUTH_PHASES.has(authPhase);
-      const shouldPoll = isInstalling || isAuthActive;
+      const isCheckingUpdate = pluginUpdatePhase === 'checking';
+      const isUpdatingPlugin = pluginUpdatePhase === 'updating';
+      const shouldPoll = isInstalling || isAuthActive || isCheckingUpdate || isUpdatingPlugin;
 
       React.useEffect(() => {
         if (!shouldPoll || typeof callControl !== 'function') {
@@ -851,6 +938,30 @@ window.__ModuleLoader__.load({
               runtimeDirtyRef.current = false;
               setBinaryPath('');
             }
+          },
+        });
+      };
+
+      const handleCheckPluginUpdate = () => {
+        return invokeAction('checkUpdate', 'checkUpdate', undefined, {
+          getNotice: (nextStatus) => {
+            const pu = nextStatus && nextStatus.pluginUpdate;
+            if (!pu || pu.phase === 'failed' || pu.phase === 'cancelled' || pu.phase === 'checking') {
+              return null;
+            }
+            return pu.updateAvailable ? copy.pluginUpdateFoundNotice : copy.pluginUpToDateNotice;
+          },
+        });
+      };
+
+      const handleUpdatePlugin = () => {
+        return invokeAction('updatePlugin', 'updatePlugin', {}, {
+          getNotice: (nextStatus) => {
+            const pu = nextStatus && nextStatus.pluginUpdate;
+            if (!pu || pu.phase !== 'succeeded') {
+              return null;
+            }
+            return pu.restartRequired ? null : copy.pluginUpdatedNotice;
           },
         });
       };
@@ -1011,6 +1122,58 @@ window.__ModuleLoader__.load({
       const isOAuthMethod =
         authMethod === 'oauth-personal' || authMethod === 'oauth-business';
 
+      let pluginBadgeText = copy.pluginStatusUnchecked;
+      let pluginBadgeClass = 'agp-badge';
+      if (isCheckingUpdate) {
+        pluginBadgeText = copy.pluginStatusChecking;
+        pluginBadgeClass = 'agp-badge agp-badge-warn';
+      } else if (isUpdatingPlugin) {
+        pluginBadgeText = copy.pluginStatusUpdating;
+        pluginBadgeClass = 'agp-badge agp-badge-warn';
+      } else if (pluginUpdatePhase === 'failed') {
+        pluginBadgeText = copy.pluginStatusFailed;
+        pluginBadgeClass = 'agp-badge agp-badge-err';
+      } else if (pluginUpdateState && pluginUpdateState.restartRequired) {
+        pluginBadgeText = copy.pluginStatusRestart;
+        pluginBadgeClass = 'agp-badge agp-badge-warn';
+      } else if (pluginUpdateState && pluginUpdateState.updateAvailable) {
+        pluginBadgeText = copy.pluginStatusAvailable;
+        pluginBadgeClass = 'agp-badge agp-badge-warn';
+      } else if (pluginUpdatePhase === 'succeeded') {
+        pluginBadgeText = copy.pluginStatusUpdated;
+        pluginBadgeClass = 'agp-badge agp-badge-ok';
+      } else if (pluginUpdateState && pluginUpdateState.reason === 'ahead') {
+        pluginBadgeText = copy.pluginStatusAhead;
+        pluginBadgeClass = 'agp-badge agp-badge-ok';
+      } else if (pluginUpdateState && pluginUpdateState.checkedAt) {
+        pluginBadgeText = copy.pluginStatusUpToDate;
+        pluginBadgeClass = 'agp-badge agp-badge-ok';
+      }
+
+      const canAutoUpdate = Boolean(pluginUpdateState && pluginUpdateState.canAutoUpdate);
+      const currentPluginDisplay = pluginUpdateState && pluginUpdateState.currentVersion
+        ? `v${pluginUpdateState.currentVersion}${
+            pluginUpdateState.currentCommit
+              ? ` (${String(pluginUpdateState.currentCommit).slice(0, 7)})`
+              : ''
+          }`
+        : copy.unknown;
+      const latestPluginDisplay =
+        pluginUpdateState && (pluginUpdateState.latestVersion || pluginUpdateState.latestCommit)
+          ? `${pluginUpdateState.latestVersion ? `v${pluginUpdateState.latestVersion}` : ''}${
+              pluginUpdateState.latestCommit
+                ? `${pluginUpdateState.latestVersion ? ' ' : ''}(${String(
+                    pluginUpdateState.latestCommit,
+                  ).slice(0, 7)})`
+                : ''
+            }`
+          : copy.pluginStatusUnchecked;
+      const cliUpdateAvailable = Boolean(
+        pluginUpdateState &&
+          pluginUpdateState.cliUpdateAvailable &&
+          pluginUpdateState.cliLatestVersion,
+      );
+
       let cliBadgeText = copy.statusMissing;
       let cliBadgeClass = 'agp-badge agp-badge-err';
       if (isInstalling) {
@@ -1087,6 +1250,202 @@ window.__ModuleLoader__.load({
             )
           : null,
 
+        // Card 0: Plugin Version & Updates
+        h(
+          'section',
+          { className: 'agp-card', 'data-acp-card': 'plugin-update' },
+          h(
+            'div',
+            { className: 'agp-card-head' },
+            h('h3', { className: 'agp-card-title' }, copy.pluginTitle),
+            h(
+              'span',
+              { className: pluginBadgeClass, 'data-acp-badge': 'plugin-update' },
+              pluginBadgeText,
+            ),
+          ),
+          h(
+            'div',
+            { className: 'agp-kv-grid' },
+            h(
+              'div',
+              { className: 'agp-kv-item' },
+              h('span', { className: 'agp-kv-label' }, copy.fieldCurrentPluginVersion),
+              h(
+                'span',
+                { className: 'agp-kv-value agp-mono', 'data-acp-plugin-current': 'true' },
+                currentPluginDisplay,
+              ),
+            ),
+            h(
+              'div',
+              { className: 'agp-kv-item' },
+              h('span', { className: 'agp-kv-label' }, copy.fieldLatestPluginVersion),
+              pluginUpdateState &&
+                (pluginUpdateState.commitUrl || pluginUpdateState.repoUrl) &&
+                (pluginUpdateState.latestVersion || pluginUpdateState.latestCommit)
+                ? h(
+                    'a',
+                    {
+                      href: pluginUpdateState.commitUrl || pluginUpdateState.repoUrl,
+                      target: '_blank',
+                      rel: 'noopener noreferrer',
+                      className: 'agp-kv-value agp-mono',
+                      'data-acp-plugin-latest': 'true',
+                    },
+                    latestPluginDisplay,
+                  )
+                : h(
+                    'span',
+                    { className: 'agp-kv-value agp-mono', 'data-acp-plugin-latest': 'true' },
+                    latestPluginDisplay,
+                  ),
+            ),
+            pluginUpdateState && (pluginUpdateState.latestMessage || pluginUpdateState.latestDate)
+              ? h(
+                  'div',
+                  { className: 'agp-kv-item' },
+                  h('span', { className: 'agp-kv-label' }, copy.fieldLatestCommitNote),
+                  h(
+                    'span',
+                    { className: 'agp-kv-value' },
+                    [pluginUpdateState.latestMessage, pluginUpdateState.latestDate]
+                      .filter(Boolean)
+                      .join(' · '),
+                  ),
+                )
+              : null,
+            pluginUpdateState && pluginUpdateState.checkedAt
+              ? h(
+                  'div',
+                  { className: 'agp-kv-item' },
+                  h('span', { className: 'agp-kv-label' }, copy.fieldCheckedAt),
+                  h(
+                    'span',
+                    { className: 'agp-kv-value agp-mono' },
+                    pluginUpdateState.checkedAt,
+                  ),
+                )
+              : null,
+          ),
+          pluginUpdateState && pluginUpdateState.restartRequired
+            ? h(
+                'div',
+                {
+                  className: 'agp-banner agp-banner-ok',
+                  role: 'status',
+                  'data-acp-banner': 'restart-required',
+                },
+                copy.restartRequiredBanner,
+              )
+            : null,
+          pluginUpdateState &&
+          !pluginUpdateState.restartRequired &&
+          (isCheckingUpdate ||
+            isUpdatingPlugin ||
+            ((pluginUpdatePhase === 'failed' ||
+              pluginUpdatePhase === 'cancelled' ||
+              pluginUpdatePhase === 'succeeded') &&
+              (pluginUpdateState.error || pluginUpdateState.message)))
+            ? h(
+                'div',
+                {
+                  className:
+                    pluginUpdatePhase === 'failed'
+                      ? 'agp-banner agp-banner-error'
+                      : 'agp-banner agp-banner-info',
+                  'data-acp-plugin-update-phase': pluginUpdatePhase,
+                },
+                pluginUpdateState.error
+                  ? sanitizeDisplayError(pluginUpdateState.error)
+                  : pluginUpdateState.message || '',
+              )
+            : null,
+          pluginUpdateState &&
+          !canAutoUpdate &&
+          pluginUpdateState.updateAvailable &&
+          pluginUpdateState.installSpec
+            ? h(
+                'div',
+                { className: 'agp-oauth-box', 'data-acp-manual-update': 'true' },
+                h('p', { className: 'agp-muted', style: { margin: 0 } }, copy.manualUpdateHint),
+                h(
+                  'div',
+                  { className: 'agp-url-box agp-mono' },
+                  `dsh plugin --profile web add ${pluginUpdateState.installSpec}`,
+                ),
+              )
+            : null,
+          h(
+            'div',
+            { className: 'agp-row' },
+            h(
+              'button',
+              {
+                type: 'button',
+                className:
+                  pluginUpdateState && pluginUpdateState.updateAvailable
+                    ? 'agp-btn'
+                    : 'agp-btn agp-btn-primary',
+                'data-acp-action': 'check-update',
+                disabled: isCheckingUpdate || isUpdatingPlugin || isBusy,
+                onClick: () => {
+                  handleCheckPluginUpdate();
+                },
+              },
+              copy.checkUpdateBtn,
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className:
+                  pluginUpdateState && pluginUpdateState.updateAvailable
+                    ? 'agp-btn agp-btn-primary'
+                    : 'agp-btn',
+                'data-acp-action': 'update-plugin',
+                disabled:
+                  !canAutoUpdate || isUpdatingPlugin || isCheckingUpdate || isBusy,
+                onClick: () => {
+                  handleUpdatePlugin();
+                },
+              },
+              pluginUpdateState &&
+                !pluginUpdateState.updateAvailable &&
+                pluginUpdateState.checkedAt
+                ? copy.reinstallLatestBtn
+                : copy.updatePluginBtn,
+            ),
+            isCheckingUpdate || isUpdatingPlugin
+              ? h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'agp-btn agp-btn-danger',
+                    'data-acp-action': 'cancel-plugin-update',
+                    disabled: isBusy,
+                    onClick: () => {
+                      invokeAction('cancelPluginUpdate', 'cancelPluginUpdate');
+                    },
+                  },
+                  copy.cancelUpdateBtn,
+                )
+              : null,
+            pluginUpdateState && pluginUpdateState.repoUrl
+              ? h(
+                  'a',
+                  {
+                    href: pluginUpdateState.repoUrl,
+                    target: '_blank',
+                    rel: 'noopener noreferrer',
+                    className: 'agp-btn',
+                  },
+                  copy.githubRepoLink,
+                )
+              : null,
+          ),
+        ),
+
         // Card 1: CLI Runtime & Installation
         h(
           'section',
@@ -1095,7 +1454,18 @@ window.__ModuleLoader__.load({
             'div',
             { className: 'agp-card-head' },
             h('h3', { className: 'agp-card-title' }, copy.cliTitle),
-            h('span', { className: cliBadgeClass, 'data-acp-badge': 'cli' }, cliBadgeText),
+            h(
+              'div',
+              { className: 'agp-row' },
+              cliUpdateAvailable
+                ? h(
+                    'span',
+                    { className: 'agp-badge agp-badge-warn', 'data-acp-badge': 'cli-update' },
+                    `${copy.cliNewVersionBadgePrefix}${pluginUpdateState.cliLatestVersion}${copy.cliNewVersionBadgeSuffix}`,
+                  )
+                : null,
+              h('span', { className: cliBadgeClass, 'data-acp-badge': 'cli' }, cliBadgeText),
+            ),
           ),
           h(
             'div',

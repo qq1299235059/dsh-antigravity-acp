@@ -74,7 +74,7 @@ flowchart LR
 | `./llm` (`dsh-antigravity-acp/llm`) | `dist/llm-plugin.js` | Node 宿主 | 注册主模型 `LlmAdapter`（含私有 HTTP MCP Bridge）并响应运行时变更刷新模型列表 |
 | `./subagent` (`dsh-antigravity-acp/subagent`) | `dist/subagent-plugin.js` | Node 宿主 | 注册外部隔离 `SubagentProvider` |
 | `./client` (`dsh-antigravity-acp/client`) | `dist/client.js` | Web 浏览器 | 纯浏览器插件（`dsh.client.platform: "web"`），注入 `['slots', 'remote']`，挂载 `antigravityControl` 并注册 `settings.section` 与 `settings.section.icon`（`id: "antigravity-acp"`） |
-| `antigravityControl` (`TypertRemoteService`) | `src/remote/control-remote.ts` | Node 宿主 ↔ 浏览器 | 暴露 `status`、`installCli`、`installCancel`、`saveConfig`、`authStart`、`authSubmitCode`、`authCancel`、`logout`、`refreshModels`、`refreshQuota` 共 10 个严格 Codec RPC 方法 |
+| `antigravityControl` (`TypertRemoteService`) | `src/remote/control-remote.ts` | Node 宿主 ↔ 浏览器 | 暴露 `status`、`installCli`、`installCancel`、`saveConfig`、`authStart`、`authSubmitCode`、`authCancel`、`logout`、`refreshModels`、`refreshQuota`、`checkUpdate`、`updatePlugin`、`cancelPluginUpdate` 共 13 个严格 Codec RPC 方法 |
 
 ---
 
@@ -127,7 +127,7 @@ cd dsh-antigravity-acp
 npm ci
 npm run check
 npm pack
-dsh plugin --profile web add /path/to/dsh-antigravity-acp-0.1.0.tgz
+dsh plugin --profile web add /path/to/dsh-antigravity-acp-0.2.0.tgz
 ```
 
 ### 首次初始化与登录
@@ -157,12 +157,15 @@ npx dsh-antigravity-acp doctor
 
 安装并重启 DSH 后，打开左下角 **设置 -> Antigravity ACP** 即可在图形界面中完成全部初始化与日常管理（由 `./client` 浏览器模块通过 `antigravityControl` Typert Remote 服务驱动；无 `typert` 的无头/CLI Profile 不受影响）：
 
-1. **Antigravity CLI 运行时与一键安装**
+1. **插件版本与更新**
+   - 展示当前已安装插件版本与 GitHub 仓库最新版本号 / Commit SHA、提交说明及检查时间，并顺带检测官方 `agy` CLI 是否有新版本（在 CLI 卡片右上角显示新版徽标）。
+   - 点击 **检查更新** 实时查询 GitHub `main` 分支最新提交与 `package.json` 版本；存在新版本或新提交时，点击 **立即更新** 通过 DSH 插件管理器拉取对应 Commit 并自动完成安装（安装期间支持点击 **取消更新**）。若当前处于非热重载（non-HMR）模式或文件变动需要重启，会展示清晰的重启提示横幅；无头环境也会给出可复制的 `dsh plugin add` 命令行指引。
+2. **Antigravity CLI 运行时与一键安装**
    - 查看当前安装状态（`已安装` / `未安装` / `安装中`）、解析命令路径、来源（`configured` / `cached` / `path` / `downloaded`）、版本号与隔离配置目录。
    - 点击 **安装 / 更新 Antigravity CLI** 一键下载并校验官方托管版 `agy` CLI；运行期间每 1.5 秒自动轮询进度并可随时点击 **取消安装**。
    - 若此前设置了自定义 `binaryPath`，界面会提示并提供 **安装托管版 CLI 并切换**，一键清除 `binaryPath` 并安装托管版本。
    - 可直接编辑并保存 `binaryPath`、`autoDownload`、`proxyUrl` 与 `proxyBypass`（非密钥配置持久化到 `<profileDir>/ui-config.json` 并热更新连接池）。
-2. **OAuth 与鉴权配置**
+3. **OAuth 与鉴权配置**
    - 查看实时登录状态、已登录账号与当前鉴权模式，并可在 4 种模式间切换：
      - `oauth-personal`（Google 个人账号 OAuth — 推荐）
      - `oauth-business`（Google 企业 / GCP OAuth，支持填写 `gcpProject` 与 `gcpLocation`）
@@ -170,7 +173,7 @@ npx dsh-antigravity-acp doctor
      - `agent-platform`（Agent Platform API Key）
    - OAuth 模式提供 **授权码登录（推荐）**（展示授权链接、`打开授权页面`、`复制授权链接` 及授权码/回调 URL 粘贴提交）与 **本地回调登录**，支持随时 **取消登录** 与 **退出登录**。
    - API Key 模式提供密码输入框、**保存并验证 API Key** 与 **清除 Key**（密钥独立保存于 `<profileDir>/ui-secrets.json`，`status` 快照仅返回 `hasApiKey` 布尔标记而绝不回传明文密钥）。
-3. **模型与配额**
+4. **模型与配额**
    - 一键 **刷新模型列表** 查看已发现模型的名称、ID、默认模型标记及支持的 `thinkingOptions` 推理档位。
    - 一键 **刷新配额** 查看各个配额窗口的剩余百分比进度条、账号/档位信息与重置时间。
 
@@ -239,6 +242,7 @@ dsh-antigravity-acp <command> [options]
 | `logout` | 清除本地保存的 OAuth 凭证并回收连接池 Worker |
 | `models [--refresh]` | 探测并列出可用模型、上下文容量与 `thought_level` 推理档位 |
 | `quota` | 通过 Cloud Code Assist 探测当前账号配额窗口与重置时间 |
+| `check-update` | 检查 GitHub 最新插件版本 / Commit 与官方 `agy` CLI 版本更新 |
 | `doctor [--strict]` | 执行 Node 版本、二进制、鉴权、代理 URL、ACP `initialize` 握手全链路自检 |
 | `help`, `--help`, `-h` | 显示帮助文本 |
 
