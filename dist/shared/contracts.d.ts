@@ -257,6 +257,113 @@ export interface AntigravityRuntimeService {
     }): Promise<AcpClientHandle>;
     warmup(signal?: AbortSignal): Promise<void>;
     dispose(): Promise<void>;
+    installManaged?(options?: {
+        readonly signal?: AbortSignal;
+        readonly onProgress?: (message: string) => void;
+    }): Promise<AntigravityExecutable>;
+    updateConfig?(patch: Partial<RuntimeConfig>): Promise<RuntimeConfig>;
+    onRuntimeChanged?(listener: () => void): () => void;
+}
+/** Phase of a background managed CLI installation task. */
+export type AntigravityInstallTaskPhase = 'idle' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+/** Phase of an interactive or API-key authentication task. */
+export type AntigravityAuthTaskPhase = 'idle' | 'starting' | 'awaiting_code' | 'awaiting_browser' | 'exchanging' | 'succeeded' | 'failed' | 'cancelled';
+/** Background CLI installation task status exposed by the control remote. */
+export interface AntigravityInstallTaskState {
+    readonly phase: AntigravityInstallTaskPhase;
+    readonly message: string;
+    readonly startedAt?: string;
+    readonly finishedAt?: string;
+    readonly error?: string;
+}
+/** Authentication task status exposed by the control remote. */
+export interface AntigravityAuthTaskState {
+    readonly phase: AntigravityAuthTaskPhase;
+    readonly mode?: 'code' | 'loopback';
+    readonly authUrl?: string;
+    readonly message: string;
+    readonly startedAt?: string;
+    readonly finishedAt?: string;
+    readonly error?: string;
+}
+/** JSON-safe model summary returned in {@link AntigravityControlStatusSnapshot}. */
+export interface AntigravityControlModelSummary {
+    readonly id: string;
+    readonly name: string;
+    readonly description?: string;
+    readonly isDefault?: boolean;
+    readonly defaultThoughtLevel?: string;
+    readonly thinkingOptions?: readonly {
+        readonly id: string;
+        readonly name: string;
+    }[];
+}
+/** Complete JSON-safe status snapshot exposed by the `antigravityControl` Typert remote. */
+export interface AntigravityControlStatusSnapshot {
+    readonly installed: boolean;
+    readonly executable?: {
+        readonly command: string;
+        readonly source: 'configured' | 'path' | 'cached' | 'downloaded';
+        readonly version?: string;
+        readonly cacheDir?: string;
+    };
+    readonly profile: AntigravityProfile;
+    readonly config: {
+        readonly binaryPath: string;
+        readonly autoDownload: boolean;
+        readonly authMethod: AntigravityAuthMethod;
+        readonly gcpProject: string;
+        readonly gcpLocation: string;
+        readonly proxyUrl: string;
+        readonly proxyBypass: string;
+        readonly hasApiKey: boolean;
+    };
+    readonly pool: {
+        readonly activeLeases: number;
+        readonly idleWorkers: number;
+        readonly maxConcurrentSessions: number;
+    };
+    readonly install: AntigravityInstallTaskState;
+    readonly auth: AntigravityAuthTaskState;
+    readonly models: readonly AntigravityControlModelSummary[];
+    readonly modelsError?: string;
+    readonly quota?: {
+        readonly capturedAt: string;
+        readonly account?: string;
+        readonly tier?: string;
+        readonly exhausted: boolean;
+        readonly windows: readonly QuotaWindow[];
+    };
+    readonly quotaError?: string;
+    readonly updatedAt: string;
+}
+/** Input payload for `antigravityControl/install`. */
+export interface AntigravityInstallInput {
+    readonly clearBinaryPath?: boolean;
+}
+/** Input payload for `antigravityControl/saveConfig`. */
+export interface AntigravitySaveConfigInput {
+    readonly binaryPath?: string;
+    readonly autoDownload?: boolean;
+    readonly authMethod?: AntigravityAuthMethod;
+    readonly gcpProject?: string;
+    readonly gcpLocation?: string;
+    readonly proxyUrl?: string;
+    readonly proxyBypass?: string;
+    readonly apiKey?: string;
+    readonly clearApiKey?: boolean;
+}
+/** Input payload for `antigravityControl/authStart`. */
+export interface AntigravityAuthStartInput {
+    readonly mode?: 'code' | 'loopback';
+    readonly authMethod?: AntigravityAuthMethod;
+    readonly apiKey?: string;
+    readonly gcpProject?: string;
+    readonly gcpLocation?: string;
+}
+/** Input payload for `antigravityControl/authSubmitCode`. */
+export interface AntigravityAuthSubmitCodeInput {
+    readonly code: string;
 }
 declare module '@deepseek-ai/cordis' {
     interface Context {

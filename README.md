@@ -12,7 +12,7 @@
 [![Cordis](https://img.shields.io/badge/Cordis-4.1.0-0ea5e9.svg)](https://github.com/deepseek-ai/cordis)
 [![ACP](https://img.shields.io/badge/ACP-v1%20(%40agentclientprotocol%2Fsdk%201.4.0)-f59e0b.svg)](https://agentclientprotocol.com/)
 
-[架构总览](#架构总览) · [双模式对比](#双模式对比) · [快速安装](#快速安装) · [接线配置](#与-deepseek-aidshtool-subagent-接线) · [独立 CLI](#独立-cli-使用) · [配置参考](#配置项参考) · [故障排查](#错误码与故障排查)
+[架构总览](#架构总览) · [双模式对比](#双模式对比) · [快速安装](#快速安装) · [DSH 设置菜单](#dsh-设置菜单) · [接线配置](#与-deepseek-aidshtool-subagent-接线) · [独立 CLI](#独立-cli-使用) · [配置参考](#配置项参考) · [故障排查](#错误码与故障排查)
 
 </div>
 
@@ -30,6 +30,7 @@
 - **4 种鉴权方式 + 无头终端登录**：支持 `oauth-personal`、`oauth-business`、`gemini-api-key`、`agent-platform`，以及本地 loopback OAuth 与 `agy acp --login` 授权码粘贴（适合 SSH / 远程环境）；自动剥离 `stdout` OAuth 引导文本防止污染 JSON-RPC NDJSON 流。
 - **原生 ACP 1.5.x 协议能力**：支持 `_meta.antigravity.systemPrompt.append` 追加系统提示、独立 `thought_level` 推理强度发现、多模态图片输入（可选注入 `ctx.get('attachments')`）与会话级前缀增量复用（`SessionReuseTracker`）。
 - **主模型模式严守 DSH 工具边界**：禁用 ACP `fs` / `terminal`，通过 `127.0.0.1:0` 随机端口 + 32 字节随机 Bearer Token 的私有 Streamable HTTP MCP Bridge 将 DSH 工具暴露给模型，支持并发与多轮工具挂起/续传；一切绕过 Bridge 的 Antigravity 原生工具调用都会被立即拦截并报错 `AGY_NATIVE_TOOLS_BLOCKED`。
+- **DSH 图形化设置面板（`设置 -> Antigravity ACP`）**：通过纯浏览器入口 `./client`（`dist/client.js`）与宿主 Typert Remote 服务 `antigravityControl` 联动，直接在 DSH UI 中完成 CLI 一键安装/取消、`binaryPath`/`autoDownload`/代理配置、OAuth 登录（授权码 / 本地回调）或 API Key 鉴权，以及模型列表与配额实时检查。
 - **开箱即用的独立 CLI**：自带 `node:child_process` 轻量 `SubprocessRuntime` 实现，无需预先挂载 DSH 宿主即可完成 `install`、`login`、`models`、`quota` 与 `doctor` 诊断。
 
 ---
@@ -39,6 +40,8 @@
 ```mermaid
 flowchart LR
     DSH["DeepSeek Harness Host (dsh 0.2.2-rc.1 ~ rc.3)"]
+    UI["DSH Web 设置面板 (./client -> dist/client.js)"]
+    RPC["Typert Remote (antigravityControl)"]
     RT["antigravity-runtime (ctx.antigravityRuntime)"]
     LLM["llm-antigravity-acp (LlmAdapter)"]
     SUB["subagent-antigravity-acp (SubagentProvider)"]
@@ -47,6 +50,9 @@ flowchart LR
     AGY1["agy acp 1.5.x (主对话进程)"]
     AGY2["agy acp 1.5.x (一次性隔离进程)"]
 
+    UI <--> RPC
+    DSH --> RPC
+    RPC --> RT
     DSH --> RT
     DSH --> LLM
     DSH --> SUB
@@ -59,6 +65,16 @@ flowchart LR
     RT --> AGY2
     SUB <--> AGY2
 ```
+
+### 包导出与服务入口
+
+| 导出路径 / 服务名 | 产物位置 | 运行端 | 说明 |
+| --- | --- | --- | --- |
+| `.` (`dsh-antigravity-acp`) | `dist/index.js` | Node 宿主 | 注册共享服务 `antigravityRuntime`，并在检测到 `typert` 时按需挂载 `antigravityControl` Remote 控制服务 |
+| `./llm` (`dsh-antigravity-acp/llm`) | `dist/llm-plugin.js` | Node 宿主 | 注册主模型 `LlmAdapter`（含私有 HTTP MCP Bridge）并响应运行时变更刷新模型列表 |
+| `./subagent` (`dsh-antigravity-acp/subagent`) | `dist/subagent-plugin.js` | Node 宿主 | 注册外部隔离 `SubagentProvider` |
+| `./client` (`dsh-antigravity-acp/client`) | `dist/client.js` | Web 浏览器 | 纯浏览器插件（`dsh.client.platform: "web"`），注入 `['slots', 'remote']`，挂载 `antigravityControl` 并注册 `settings.section` 与 `settings.section.icon`（`id: "antigravity-acp"`） |
+| `antigravityControl` (`TypertRemoteService`) | `src/remote/control-remote.ts` | Node 宿主 ↔ 浏览器 | 暴露 `status`、`install`、`installCancel`、`saveConfig`、`authStart`、`authSubmitCode`、`authCancel`、`logout`、`refreshModels`、`refreshQuota` 共 10 个严格 Codec RPC 方法 |
 
 ---
 
@@ -134,6 +150,29 @@ npx dsh-antigravity-acp doctor
 2. 插件托管缓存（`cached`，位于 `<cacheDir>/tools/antigravity-acp/<platform>-<arch>`）
 3. 系统 `PATH` 中的本机 `agy` / `antigravity`（`path`）
 4. 当 `autoDownload: true` 时从官方更新源下载并校验 SHA-512（`downloaded`）
+
+---
+
+## DSH 设置菜单
+
+安装并重启 DSH 后，打开左下角 **设置 -> Antigravity ACP** 即可在图形界面中完成全部初始化与日常管理（由 `./client` 浏览器模块通过 `antigravityControl` Typert Remote 服务驱动；无 `typert` 的无头/CLI Profile 不受影响）：
+
+1. **Antigravity CLI 运行时与一键安装**
+   - 查看当前安装状态（`已安装` / `未安装` / `安装中`）、解析命令路径、来源（`configured` / `cached` / `path` / `downloaded`）、版本号与隔离配置目录。
+   - 点击 **安装 / 更新 Antigravity CLI** 一键下载并校验官方托管版 `agy` CLI；运行期间每 1.5 秒自动轮询进度并可随时点击 **取消安装**。
+   - 若此前设置了自定义 `binaryPath`，界面会提示并提供 **安装托管版 CLI 并切换**，一键清除 `binaryPath` 并安装托管版本。
+   - 可直接编辑并保存 `binaryPath`、`autoDownload`、`proxyUrl` 与 `proxyBypass`（非密钥配置持久化到 `<profileDir>/ui-config.json` 并热更新连接池）。
+2. **OAuth 与鉴权配置**
+   - 查看实时登录状态、已登录账号与当前鉴权模式，并可在 4 种模式间切换：
+     - `oauth-personal`（Google 个人账号 OAuth — 推荐）
+     - `oauth-business`（Google 企业 / GCP OAuth，支持填写 `gcpProject` 与 `gcpLocation`）
+     - `gemini-api-key`（Gemini API Key）
+     - `agent-platform`（Agent Platform API Key）
+   - OAuth 模式提供 **授权码登录（推荐）**（展示授权链接、`打开授权页面`、`复制授权链接` 及授权码/回调 URL 粘贴提交）与 **本地回调登录**，支持随时 **取消登录** 与 **退出登录**。
+   - API Key 模式提供密码输入框、**保存并验证 API Key** 与 **清除 Key**（密钥独立保存于 `<profileDir>/ui-secrets.json`，`status` 快照仅返回 `hasApiKey` 布尔标记而绝不回传明文密钥）。
+3. **模型与配额**
+   - 一键 **刷新模型列表** 查看已发现模型的名称、ID、默认模型标记及支持的 `thinkingOptions` 推理档位。
+   - 一键 **刷新配额** 查看各个配额窗口的剩余百分比进度条、账号/档位信息与重置时间。
 
 ---
 

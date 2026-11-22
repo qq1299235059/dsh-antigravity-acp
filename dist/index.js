@@ -2,8 +2,10 @@ import { spawnAcpClient } from './acp/client.js';
 import { AcpWorkerPool } from './acp/pool.js';
 import { checkProfileAuth, clearProfileAuth, runCodeLogin, runLoopbackLogin, } from './runtime/auth.js';
 import { createAntigravityInstaller, } from './runtime/installer.js';
-import { prepareAntigravityProfile, resolveProfileSnapshot, validateAuthConfig, validateProxyUrl, } from './runtime/profile.js';
+import { prepareAntigravityProfile, resolveProfilePaths, resolveProfileSnapshot, validateAuthConfig, validateProxyUrl, } from './runtime/profile.js';
 import { probeAntigravityQuota } from './runtime/quota.js';
+import { registerAntigravityControlRemote, } from './remote/control-remote.js';
+import { loadUiOverrides, mergeRuntimeConfigWithOverrides, } from './remote/ui-store.js';
 import { RuntimeConfigSchema } from './shared/config.js';
 import { AntigravityAcpError, redactSensitiveText } from './shared/errors.js';
 export const name = 'antigravity-runtime';
@@ -51,6 +53,23 @@ function raceWithAbortSignal(promise, signal) {
         });
     });
 }
+const VALID_AUTH_METHODS = new Set([
+    'oauth-personal',
+    'oauth-business',
+    'gemini-api-key',
+    'agent-platform',
+]);
+const OPTIONAL_RUNTIME_STRING_KEYS = [
+    'apiKey',
+    'apiKeyEnv',
+    'gcpProject',
+    'gcpLocation',
+    'binaryPath',
+    'cacheDir',
+    'profileDir',
+    'proxyUrl',
+    'proxyBypass',
+];
 /**
  * Create a standalone {@link AntigravityRuntimeService} backed by the given {@link SubprocessRuntime}.
  */
@@ -58,7 +77,8 @@ export function createAntigravityRuntimeService(subprocess, config, options = {}
     const envInput = options.env ?? process.env;
     const homeDir = options.homeDir;
     const activePlatform = options.platform ?? process.platform;
-    const installer = createAntigravityInstaller(config, {
+    let currentConfig = { ...config };
+    const buildInstaller = (cfg) => createAntigravityInstaller(cfg, {
         ...options.installerOptions,
         subprocess,
         env: options.installerOptions?.env ?? envInput,
@@ -66,14 +86,28 @@ export function createAntigravityRuntimeService(subprocess, config, options = {}
         platform: options.installerOptions?.platform ?? activePlatform,
         fetch: options.installerOptions?.fetch ?? options.fetch,
     });
+    let installer = buildInstaller(currentConfig);
     const disposeController = new AbortController();
     let disposed = false;
+    let configEpoch = 0;
     let cachedModels;
     let lastQuota;
     let inflightDiscovery;
+    const changeListeners = new Set();
+    const notifyChanged = () => {
+        for (const listener of [...changeListeners]) {
+            try {
+                listener();
+            }
+            catch (error) {
+                const msg = error instanceof Error ? redactSensitiveText(error.message) : String(error);
+                options.logger?.warn(`antigravity runtime change listener failed: ${msg}`);
+            }
+        }
+    };
     const resolveExecutable = (signal) => installer.resolveExecutable({
         signal,
-        allowDownload: config.autoDownload,
+        allowDownload: currentConfig.autoDownload,
     });
     const ensureInstalled = async (signal) => {
         try {
@@ -85,7 +119,7 @@ export function createAntigravityRuntimeService(subprocess, config, options = {}
         catch (error) {
             if (error instanceof AntigravityAcpError &&
                 error.code === 'AGY_NOT_INSTALLED' &&
-                !config.binaryPath?.trim()) {
+                !currentConfig.binaryPath?.trim()) {
                 return installer.installManaged({ signal });
             }
             throw error;
@@ -98,7 +132,8 @@ export function createAntigravityRuntimeService(subprocess, config, options = {}
                 cause: opts.signal.reason,
             }));
         }
-        const run = prepareQueue.then(() => prepareAntigravityProfile(config, {
+        const snapshotConfig = currentConfig;
+        const run = prepareQueue.then(() => prepareAntigravityProfile(snapshotConfig, {
             env: envInput,
             homeDir,
             platform: activePlatform,
@@ -109,24 +144,26 @@ export function createAntigravityRuntimeService(subprocess, config, options = {}
     };
     const createPool = () => new AcpWorkerPool({
         subprocess,
-        config,
+        config: currentConfig,
         resolveExecutable,
         prepareProfile,
         skipVersionCheck: options.skipVersionCheck,
     });
     let pool = createPool();
     const service = {
-        config,
+        get config() {
+            return currentConfig;
+        },
         resolveExecutable,
         ensureInstalled,
         resolveProfile() {
-            return resolveProfileSnapshot(config, envInput, homeDir, activePlatform);
+            return resolveProfileSnapshot(currentConfig, envInput, homeDir, activePlatform);
         },
         async checkAuth(signal) {
             if (signal?.aborted) {
                 throw new AntigravityAcpError('Auth check aborted', 'ABORTED', { cause: signal.reason });
             }
-            return checkProfileAuth(config, envInput, homeDir, activePlatform);
+            return checkProfileAuth(currentConfig, envInput, homeDir, activePlatform);
         },
         async login(loginOpts) {
             if (disposed) {
@@ -138,7 +175,7 @@ export function createAntigravityRuntimeService(subprocess, config, options = {}
                 });
             }
             const effectiveConfig = {
-                ...config,
+                ...currentConfig,
                 ...(loginOpts?.authMethod !== undefined ? { authMethod: loginOpts.authMethod } : {}),
                 ...(loginOpts?.apiKey !== undefined ? { apiKey: loginOpts.apiKey } : {}),
             };
@@ -155,6 +192,7 @@ export function createAntigravityRuntimeService(subprocess, config, options = {}
                     throw new AntigravityAcpError(`Missing API key for auth method "${effectiveConfig.authMethod}"`, 'AGY_AUTH_REQUIRED');
                 }
                 cachedModels = undefined;
+                notifyChanged();
                 return resolveProfileSnapshot(effectiveConfig, envInput, homeDir, activePlatform);
             }
             const executable = await ensureInstalled(loginOpts?.signal);
@@ -223,21 +261,25 @@ export function createAntigravityRuntimeService(subprocess, config, options = {}
                 }
             }
             cachedModels = undefined;
+            notifyChanged();
             return resultProfile;
         },
         async logout(signal) {
             if (signal?.aborted) {
                 throw new AntigravityAcpError('Logout aborted', 'ABORTED', { cause: signal.reason });
             }
+            configEpoch += 1;
             cachedModels = undefined;
             lastQuota = undefined;
+            inflightDiscovery = undefined;
             const oldPool = pool;
             if (!disposed) {
                 pool = createPool();
             }
             await oldPool.dispose();
-            const snapshot = resolveProfileSnapshot(config, envInput, homeDir, activePlatform);
+            const snapshot = resolveProfileSnapshot(currentConfig, envInput, homeDir, activePlatform);
             await clearProfileAuth(snapshot);
+            notifyChanged();
         },
         async listModels(listOpts) {
             if (listOpts?.signal?.aborted) {
@@ -250,6 +292,7 @@ export function createAntigravityRuntimeService(subprocess, config, options = {}
             }
             if (inflightDiscovery === undefined) {
                 const cwd = listOpts?.cwd ?? process.cwd();
+                const taskEpoch = configEpoch;
                 const task = (async () => {
                     const lease = await pool.acquireWorker({
                         cwd,
@@ -258,7 +301,9 @@ export function createAntigravityRuntimeService(subprocess, config, options = {}
                     });
                     try {
                         const models = await lease.client.discoverModels(cwd, disposeController.signal);
-                        cachedModels = models;
+                        if (taskEpoch === configEpoch) {
+                            cachedModels = models;
+                        }
                         return models;
                     }
                     finally {
@@ -274,7 +319,7 @@ export function createAntigravityRuntimeService(subprocess, config, options = {}
             return raceWithAbortSignal(inflightDiscovery, listOpts?.signal);
         },
         async getQuota(signal) {
-            const snapshot = await probeAntigravityQuota(config, {
+            const snapshot = await probeAntigravityQuota(currentConfig, {
                 signal,
                 env: envInput,
                 homeDir,
@@ -298,7 +343,7 @@ export function createAntigravityRuntimeService(subprocess, config, options = {}
                 }
                 executable = undefined;
             }
-            const profile = resolveProfileSnapshot(config, envInput, homeDir, activePlatform);
+            const profile = resolveProfileSnapshot(currentConfig, envInput, homeDir, activePlatform);
             const stats = pool.getStats();
             return {
                 installed: executable !== undefined,
@@ -317,15 +362,89 @@ export function createAntigravityRuntimeService(subprocess, config, options = {}
             return pool.spawnClient(spawnOpts);
         },
         async warmup(signal) {
-            if (config.proxyUrl?.trim()) {
-                validateProxyUrl(config.proxyUrl);
+            if (currentConfig.proxyUrl?.trim()) {
+                validateProxyUrl(currentConfig.proxyUrl);
             }
             await resolveExecutable(signal);
             await prepareProfile({ suppressBrowser: true, signal });
-            const profile = resolveProfileSnapshot(config, envInput, homeDir, activePlatform);
+            const profile = resolveProfileSnapshot(currentConfig, envInput, homeDir, activePlatform);
             if (profile.authenticated) {
                 await service.listModels({ refresh: true, signal });
             }
+        },
+        async installManaged(installOpts) {
+            if (disposed) {
+                throw new AntigravityAcpError('Antigravity runtime has been disposed', 'ABORTED');
+            }
+            const executable = await installer.installManaged(installOpts);
+            cachedModels = undefined;
+            notifyChanged();
+            return executable;
+        },
+        async updateConfig(patch) {
+            const nextConfig = { ...currentConfig };
+            for (const key of OPTIONAL_RUNTIME_STRING_KEYS) {
+                if (!(key in patch)) {
+                    continue;
+                }
+                const raw = patch[key];
+                if (raw === undefined || raw.trim() === '') {
+                    delete nextConfig[key];
+                }
+                else {
+                    nextConfig[key] = raw.trim();
+                }
+            }
+            if ('authMethod' in patch && patch.authMethod !== undefined) {
+                if (!VALID_AUTH_METHODS.has(patch.authMethod)) {
+                    throw new AntigravityAcpError(`Unsupported authMethod: ${String(patch.authMethod)}`, 'INVALID_REQUEST');
+                }
+                nextConfig.authMethod = patch.authMethod;
+            }
+            if (patch.autoDownload !== undefined)
+                nextConfig.autoDownload = patch.autoDownload;
+            if (patch.extraArgs !== undefined)
+                nextConfig.extraArgs = [...patch.extraArgs];
+            if (patch.maxConcurrentSessions !== undefined) {
+                nextConfig.maxConcurrentSessions = patch.maxConcurrentSessions;
+            }
+            if (patch.queueTimeoutMs !== undefined)
+                nextConfig.queueTimeoutMs = patch.queueTimeoutMs;
+            if (patch.handshakeTimeoutMs !== undefined) {
+                nextConfig.handshakeTimeoutMs = patch.handshakeTimeoutMs;
+            }
+            if (patch.requestTimeoutMs !== undefined)
+                nextConfig.requestTimeoutMs = patch.requestTimeoutMs;
+            if (patch.authTimeoutMs !== undefined)
+                nextConfig.authTimeoutMs = patch.authTimeoutMs;
+            if (patch.promptTimeoutMs !== undefined)
+                nextConfig.promptTimeoutMs = patch.promptTimeoutMs;
+            if (patch.idleRecycleMs !== undefined)
+                nextConfig.idleRecycleMs = patch.idleRecycleMs;
+            if (patch.autoWarmup !== undefined)
+                nextConfig.autoWarmup = patch.autoWarmup;
+            if (nextConfig.proxyUrl?.trim()) {
+                validateProxyUrl(nextConfig.proxyUrl);
+            }
+            currentConfig = nextConfig;
+            configEpoch += 1;
+            installer = buildInstaller(currentConfig);
+            cachedModels = undefined;
+            lastQuota = undefined;
+            inflightDiscovery = undefined;
+            const oldPool = pool;
+            if (!disposed) {
+                pool = createPool();
+            }
+            await oldPool.dispose();
+            notifyChanged();
+            return currentConfig;
+        },
+        onRuntimeChanged(listener) {
+            changeListeners.add(listener);
+            return () => {
+                changeListeners.delete(listener);
+            };
         },
         async dispose() {
             if (disposed) {
@@ -334,6 +453,7 @@ export function createAntigravityRuntimeService(subprocess, config, options = {}
             disposed = true;
             disposeController.abort();
             cachedModels = undefined;
+            changeListeners.clear();
             await pool.dispose();
         },
     };
@@ -345,10 +465,16 @@ export function createAntigravityRuntimeService(subprocess, config, options = {}
  */
 export function apply(ctx, config) {
     const logger = ctx.logger(name);
-    const service = createAntigravityRuntimeService(ctx.subprocess, config, { logger });
+    const profileDir = resolveProfilePaths(config).profileDir;
+    const uiOverrides = loadUiOverrides(profileDir);
+    const effectiveConfig = mergeRuntimeConfigWithOverrides(config, uiOverrides);
+    const service = createAntigravityRuntimeService(ctx.subprocess, effectiveConfig, { logger });
     ctx.provide('antigravityRuntime', service);
+    ctx.inject(['typert'], (typertCtx) => {
+        registerAntigravityControlRemote(typertCtx, service, { logger });
+    });
     const warmupController = new AbortController();
-    if (config.autoWarmup) {
+    if (effectiveConfig.autoWarmup) {
         void service.warmup(warmupController.signal).catch((error) => {
             if (warmupController.signal.aborted) {
                 return;
@@ -365,6 +491,8 @@ export function apply(ctx, config) {
 // Re-export shared taxonomy, config schemas, contracts, and core helpers via named exports.
 export { AntigravityAcpError, redactSensitiveText, toLlmError, } from './shared/errors.js';
 export { AuthMethodSchema, LlmPluginConfigSchema, PermissionFallbackSchema, PermissionModeSchema, RuntimeConfigSchema, SubagentPluginConfigSchema, } from './shared/config.js';
+export { ANTIGRAVITY_CONTROL_INVOCATIONS, ANTIGRAVITY_CONTROL_NAMESPACE, ANTIGRAVITY_CONTROL_PACKAGE, ANTIGRAVITY_CONTROL_SERVICE_KEY, AntigravityControlService, registerAntigravityControlRemote, sanitizeControlError, stripUndefinedJson, } from './remote/control-remote.js';
+export { UI_CONFIG_FILENAME, UI_SECRETS_FILENAME, loadUiOverrides, mergeRuntimeConfigWithOverrides, saveUiOverrides, } from './remote/ui-store.js';
 export { ANTIGRAVITY_CLI_MANIFEST_BASE, MINIMUM_AGY_VERSION, antigravityCliTarget, compareSemver, parseAntigravityCliRelease, tryParseSemver, } from './runtime/release.js';
 export { AntigravityInstaller, createAntigravityInstaller, } from './runtime/installer.js';
 export { ANTIGRAVITY_AUTH_BROWSER_MARKER, ANTIGRAVITY_AUTH_STDOUT_PREFIX, buildAcpSpawnArgs, buildAntigravityEnvironment, prepareAntigravityProfile, removedEnvironmentKeys, resolveDefaultProfileDir, resolveProfilePaths, resolveProfileSnapshot, validateAuthConfig, validateLoginResponse, validateProxyUrl, parseAntigravityAuthorizationUrl, } from './runtime/profile.js';

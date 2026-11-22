@@ -26,25 +26,39 @@ export function apply(ctx: Context, config: LlmPluginConfig): void {
 
   const disposeRegistration = ctx.llm.registerAdapter([config.providerId], adapter);
   const warmupAbort = new AbortController();
+  let disposed = false;
 
-  void adapter.refreshModels(warmupAbort.signal).then(
-    () => {
-      if (!warmupAbort.signal.aborted && ctx.fiber.uid !== null) {
-        ctx.emit('llm/models-updated', config.providerId);
-      }
-    },
-    (error: unknown) => {
-      if (warmupAbort.signal.aborted) {
-        return;
-      }
-      const message =
-        error instanceof Error ? redactSensitiveText(error.message) : String(error);
-      logger.debug(`initial model discovery skipped: ${message}`);
-    },
-  );
+  const triggerModelRefresh = (reason: string): void => {
+    if (disposed || warmupAbort.signal.aborted || ctx.fiber.uid === null) {
+      return;
+    }
+    void adapter.refreshModels(warmupAbort.signal).then(
+      () => {
+        if (!disposed && !warmupAbort.signal.aborted && ctx.fiber.uid !== null) {
+          ctx.emit('llm/models-updated', config.providerId);
+        }
+      },
+      (error: unknown) => {
+        if (disposed || warmupAbort.signal.aborted) {
+          return;
+        }
+        const message =
+          error instanceof Error ? redactSensitiveText(error.message) : String(error);
+        logger.debug(`${reason} skipped: ${message}`);
+      },
+    );
+  };
+
+  triggerModelRefresh('initial model discovery');
+
+  const unsubscribeRuntimeChanged = ctx.antigravityRuntime.onRuntimeChanged?.(() => {
+    triggerModelRefresh('runtime-change model discovery');
+  });
 
   ctx.effect(
     () => async () => {
+      disposed = true;
+      unsubscribeRuntimeChanged?.();
       warmupAbort.abort();
       disposeRegistration();
       await adapter.dispose();
