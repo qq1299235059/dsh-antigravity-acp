@@ -190,7 +190,7 @@ describe('antigravityControl Typert remote & UI store', () => {
       'refreshModels',
       'refreshQuota',
     ]);
-    const expectedOneArg = new Set(['install', 'saveConfig', 'authStart', 'authSubmitCode']);
+    const expectedOneArg = new Set(['installCli', 'saveConfig', 'authStart', 'authSubmitCode']);
 
     for (const desc of contrib!.invocations) {
       expect(desc.id).toBe(`dsh-antigravity-acp#antigravityControl/${desc.method}`);
@@ -485,15 +485,15 @@ describe('antigravityControl Typert remote & UI store', () => {
     });
     fibers.push(ctx.fiber);
 
-    // Start install with clearBinaryPath: true
-    const first = await control.install({ clearBinaryPath: true });
+    // Start installCli with clearBinaryPath: true
+    const first = await control.installCli({ clearBinaryPath: true });
     assertJsonSafe(first);
     expect(mockRuntime.config.binaryPath).toBeUndefined();
     expect(first.install.phase).toBe('running');
     expect(first.install.message).toContain('Fetching manifest');
 
-    // Second concurrent install() must not double-spawn
-    const second = await control.install({});
+    // Second concurrent installCli() must not double-spawn
+    const second = await control.installCli({});
     assertJsonSafe(second);
     expect(installCalls).toBe(1);
 
@@ -504,7 +504,7 @@ describe('antigravityControl Typert remote & UI store', () => {
     expect(cancelled.install.phase).toBe('cancelled');
 
     // Run another install to completion
-    const startedAgain = await control.install({});
+    const startedAgain = await control.installCli({});
     assertJsonSafe(startedAgain);
     expect(installCalls).toBe(2);
     releaseInstall();
@@ -772,7 +772,7 @@ describe('antigravityControl Typert remote & UI store', () => {
     expect(errQuota.quotaError).not.toContain('alice:superpass');
     expect(errQuota.quotaError).not.toContain('AIzaSy');
 
-    const errInstall = await control.install({});
+    const errInstall = await control.installCli({});
     const failedInstall = await pollUntil(
       () => control.status(),
       (s) => s.install.phase === 'failed',

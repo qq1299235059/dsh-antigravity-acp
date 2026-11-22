@@ -563,7 +563,10 @@ export class AntigravityInstaller {
             const extractDir = path.join(stagingDir, 'extract');
             await fs.promises.mkdir(extractDir, { recursive: true });
             options?.onProgress?.(`Downloading Antigravity CLI ${asset.version}`);
-            const actualSha512 = await this.downloadAndHash(asset.url, downloadPath, options?.signal);
+            const actualSha512 = await this.downloadAndHash(asset.url, downloadPath, options?.signal, {
+                version: asset.version,
+                onProgress: options?.onProgress,
+            });
             const actualBuf = Buffer.from(actualSha512, 'hex');
             const expectedBuf = Buffer.from(asset.sha512, 'hex');
             if (actualBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(actualBuf, expectedBuf)) {
@@ -639,7 +642,7 @@ export class AntigravityInstaller {
         };
         await writeFileAtomic(path.join(platformCacheDir, 'active.json'), `${JSON.stringify(activePointer, null, 2)}\n`, this.platform);
     }
-    async downloadAndHash(url, destinationPath, signal) {
+    async downloadAndHash(url, destinationPath, signal, progress) {
         const downloadSignal = combineSignals(signal, DEFAULT_FETCH_TIMEOUT_MS);
         try {
             const response = await this.fetchImpl(url, {
@@ -650,14 +653,19 @@ export class AntigravityInstaller {
                 throw new AntigravityAcpError(`Asset download failed with HTTP ${response.status}`, 'AGY_INSTALL_FAILED', { status: response.status });
             }
             const contentLengthRaw = response.headers?.get?.('content-length');
+            let expectedTotalBytes;
             if (contentLengthRaw) {
                 const contentLength = Number(contentLengthRaw);
                 if (Number.isFinite(contentLength) && contentLength > this.maxDownloadBytes) {
                     throw new AntigravityAcpError(`Asset content-length ${contentLength} exceeds ${this.maxDownloadBytes} byte limit`, 'AGY_INSTALL_FAILED');
                 }
+                if (Number.isFinite(contentLength) && contentLength > 0) {
+                    expectedTotalBytes = contentLength;
+                }
             }
             const hash = crypto.createHash('sha512');
             let totalBytes = 0;
+            let lastProgressAt = 0;
             if (response.body && typeof response.body.getReader === 'function') {
                 const reader = response.body.getReader();
                 const fileHandle = await fs.promises.open(destinationPath, 'w');
@@ -678,6 +686,24 @@ export class AntigravityInstaller {
                         }
                         hash.update(value);
                         await fileHandle.write(value);
+                        if (progress?.onProgress) {
+                            const now = Date.now();
+                            if (now - lastProgressAt >= 400) {
+                                lastProgressAt = now;
+                                const mbDone = (totalBytes / (1024 * 1024)).toFixed(1);
+                                const label = progress.version
+                                    ? `Downloading Antigravity CLI ${progress.version}`
+                                    : 'Downloading Antigravity CLI';
+                                if (expectedTotalBytes !== undefined) {
+                                    const mbTotal = (expectedTotalBytes / (1024 * 1024)).toFixed(1);
+                                    const pct = Math.min(100, Math.round((totalBytes / expectedTotalBytes) * 100));
+                                    progress.onProgress(`${label} (${mbDone} / ${mbTotal} MB, ${pct}%)`);
+                                }
+                                else {
+                                    progress.onProgress(`${label} (${mbDone} MB)`);
+                                }
+                            }
+                        }
                     }
                 }
                 finally {

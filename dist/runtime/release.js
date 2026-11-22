@@ -52,6 +52,13 @@ function resolveTargetDescriptor(platform, arch, musl = false) {
     if (arch === 'arm64') {
         folders.add(`${osName}-arm${dashSuffix}`);
     }
+    const fileOs = osName === 'darwin' ? 'mac' : osName;
+    const filenames = new Set([
+        `cli_${fileOs}_${arch}${suffix}.${ext}`,
+        `cli_${osName}_${cpu}${suffix}.${ext}`,
+        `cli_${osName}_${arch}${suffix}.${ext}`,
+        `cli_${fileOs}_${cpu}${suffix}.${ext}`,
+    ]);
     return {
         os: osName,
         cpu,
@@ -62,6 +69,7 @@ function resolveTargetDescriptor(platform, arch, musl = false) {
         executableName,
         format,
         allowedFolders: folders,
+        allowedFilenames: filenames,
     };
 }
 /**
@@ -214,8 +222,7 @@ export function parseAntigravityCliRelease(value, platform, arch, musl) {
     if (!descriptor.allowedFolders.has(folder)) {
         return null;
     }
-    const expectedFilename = `cli_${descriptor.os}_${descriptor.cpu}${descriptor.suffix}.${descriptor.ext}`;
-    if (filename !== expectedFilename) {
+    if (!descriptor.allowedFilenames.has(filename)) {
         return null;
     }
     let size;

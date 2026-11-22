@@ -382,8 +382,8 @@ describe('dsh-antigravity-acp pure browser client (src/client.js)', () => {
         recordedRpc.push({ method: 'status', args });
         return Promise.resolve({ ok: true, value: mockStatus });
       },
-      install: (...args: unknown[]) => {
-        recordedRpc.push({ method: 'install', args });
+      installCli: (...args: unknown[]) => {
+        recordedRpc.push({ method: 'installCli', args });
         return Promise.resolve({ ok: true, value: mockStatus });
       },
     };
@@ -421,8 +421,24 @@ describe('dsh-antigravity-acp pure browser client (src/client.js)', () => {
     expect(mountCalls[0].descriptors).toHaveLength(10);
 
     const zeroArg = ['status', 'installCancel', 'authCancel', 'logout', 'refreshModels', 'refreshQuota'];
-    const oneArg = ['install', 'saveConfig', 'authStart', 'authSubmitCode'];
+    const oneArg = ['installCli', 'saveConfig', 'authStart', 'authSubmitCode'];
+    const reservedNamespaceMembers = new Set([
+      'ctx',
+      'empty',
+      'invokeRemote',
+      'methods',
+      'name',
+      'namespace',
+      'assertMethodAvailable',
+      'has',
+      'installDirect',
+      'installScoped',
+      'install',
+      'remove',
+      'constructor',
+    ]);
     for (const desc of mountCalls[0].descriptors) {
+      expect(reservedNamespaceMembers.has(desc.method)).toBe(false);
       expect(desc.id).toBe(`dsh-antigravity-acp#antigravityControl/${desc.method}`);
       expect(desc.service).toBe('antigravityControl');
       expect(desc.namespace).toBe('antigravityControl');
@@ -468,9 +484,9 @@ describe('dsh-antigravity-acp pure browser client (src/client.js)', () => {
 
     // Verify 0-arg call sends 0 args, and 1-arg call strips undefined keys & sends 1 clean object
     await injected.callControl('status');
-    await injected.callControl('install', { clearBinaryPath: true, ignored: undefined } as unknown);
+    await injected.callControl('installCli', { clearBinaryPath: true, ignored: undefined } as unknown);
     expect(recordedRpc[0]).toEqual({ method: 'status', args: [] });
-    expect(recordedRpc[1]).toEqual({ method: 'install', args: [{ clearBinaryPath: true }] });
+    expect(recordedRpc[1]).toEqual({ method: 'installCli', args: [{ clearBinaryPath: true }] });
     expect('ignored' in (recordedRpc[1].args[0] as Record<string, unknown>)).toBe(false);
 
     // Cleanup disposes slots and remote mount
@@ -568,8 +584,8 @@ describe('dsh-antigravity-acp pure browser client (src/client.js)', () => {
         rpcLog.push({ method: 'status', args });
         return { ok: true, value: currentStatus };
       },
-      install: async (...args) => {
-        rpcLog.push({ method: 'install', args });
+      installCli: async (...args) => {
+        rpcLog.push({ method: 'installCli', args });
         const input = (args[0] ?? {}) as { clearBinaryPath?: boolean };
         const prevCfg = currentStatus.config as Record<string, unknown>;
         currentStatus = createStatusFixture({
@@ -768,13 +784,13 @@ describe('dsh-antigravity-acp pure browser client (src/client.js)', () => {
     // Custom binaryPath exposes install-managed button
     await (findByAttr(view.getTree(), 'data-acp-action', 'install-managed').props.onClick as () => Promise<void>)();
     await flushMicrotasks();
-    expect(rpcLog.at(-1)).toEqual({ method: 'install', args: [{ clearBinaryPath: true }] });
+    expect(rpcLog.at(-1)).toEqual({ method: 'installCli', args: [{ clearBinaryPath: true }] });
     expect(findByAttr(view.getTree(), 'data-acp-input', 'binaryPath').props.value).toBe('');
 
-    // Plain install({})
+    // Plain installCli({})
     await (findByAttr(view.getTree(), 'data-acp-action', 'install').props.onClick as () => Promise<void>)();
     await flushMicrotasks();
-    expect(rpcLog.at(-1)).toEqual({ method: 'install', args: [{}] });
+    expect(rpcLog.at(-1)).toEqual({ method: 'installCli', args: [{}] });
 
     // Edit runtime fields & saveConfig
     (findByAttr(view.getTree(), 'data-acp-input', 'proxyUrl').props.onChange as (e: unknown) => void)({

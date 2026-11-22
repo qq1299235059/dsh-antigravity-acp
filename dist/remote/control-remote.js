@@ -110,7 +110,7 @@ function parseInstallInput(value) {
         return undefined;
     }
     if (!isPlainRecord(value)) {
-        throw badRequest('install input must be a plain object');
+        throw badRequest('installCli input must be a plain object');
     }
     const clearBinaryPath = assertOptionalBoolean(value, 'clearBinaryPath');
     return clearBinaryPath !== undefined ? { clearBinaryPath } : {};
@@ -247,7 +247,7 @@ function makeDirectDescriptor(method, inputCodec) {
 /** Strict Typert invocation descriptors matching the browser UI client verbatim. */
 export const ANTIGRAVITY_CONTROL_INVOCATIONS = [
     makeDirectDescriptor('status'),
-    makeDirectDescriptor('install', makeInputCodec('dsh-antigravity-acp#ControlInstallInput', parseInstallInput)),
+    makeDirectDescriptor('installCli', makeInputCodec('dsh-antigravity-acp#ControlInstallInput', parseInstallInput)),
     makeDirectDescriptor('installCancel'),
     makeDirectDescriptor('saveConfig', makeInputCodec('dsh-antigravity-acp#ControlSaveConfigInput', parseSaveConfigInput)),
     makeDirectDescriptor('authStart', makeInputCodec('dsh-antigravity-acp#ControlAuthStartInput', parseAuthStartInput)),
@@ -506,7 +506,7 @@ export class AntigravityControlService extends TypertRemoteService {
         };
         return stripUndefinedJson(snapshot);
     }
-    async install(input) {
+    async installCli(input) {
         const parsed = parseInstallInput(input);
         if (this.disposed) {
             throw badRequest('Antigravity control service has been disposed');

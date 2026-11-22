@@ -759,6 +759,10 @@ export class AntigravityInstaller {
         asset.url,
         downloadPath,
         options?.signal,
+        {
+          version: asset.version,
+          onProgress: options?.onProgress,
+        },
       );
 
       const actualBuf = Buffer.from(actualSha512, 'hex');
@@ -881,6 +885,10 @@ export class AntigravityInstaller {
     url: string,
     destinationPath: string,
     signal?: AbortSignal,
+    progress?: {
+      readonly version?: string;
+      readonly onProgress?: (msg: string) => void;
+    },
   ): Promise<string> {
     const downloadSignal = combineSignals(signal, DEFAULT_FETCH_TIMEOUT_MS);
     try {
@@ -897,6 +905,7 @@ export class AntigravityInstaller {
       }
 
       const contentLengthRaw = response.headers?.get?.('content-length');
+      let expectedTotalBytes: number | undefined;
       if (contentLengthRaw) {
         const contentLength = Number(contentLengthRaw);
         if (Number.isFinite(contentLength) && contentLength > this.maxDownloadBytes) {
@@ -905,10 +914,14 @@ export class AntigravityInstaller {
             'AGY_INSTALL_FAILED',
           );
         }
+        if (Number.isFinite(contentLength) && contentLength > 0) {
+          expectedTotalBytes = contentLength;
+        }
       }
 
       const hash = crypto.createHash('sha512');
       let totalBytes = 0;
+      let lastProgressAt = 0;
 
       if (response.body && typeof response.body.getReader === 'function') {
         const reader = response.body.getReader();
@@ -933,6 +946,23 @@ export class AntigravityInstaller {
             }
             hash.update(value);
             await fileHandle.write(value);
+            if (progress?.onProgress) {
+              const now = Date.now();
+              if (now - lastProgressAt >= 400) {
+                lastProgressAt = now;
+                const mbDone = (totalBytes / (1024 * 1024)).toFixed(1);
+                const label = progress.version
+                  ? `Downloading Antigravity CLI ${progress.version}`
+                  : 'Downloading Antigravity CLI';
+                if (expectedTotalBytes !== undefined) {
+                  const mbTotal = (expectedTotalBytes / (1024 * 1024)).toFixed(1);
+                  const pct = Math.min(100, Math.round((totalBytes / expectedTotalBytes) * 100));
+                  progress.onProgress(`${label} (${mbDone} / ${mbTotal} MB, ${pct}%)`);
+                } else {
+                  progress.onProgress(`${label} (${mbDone} MB)`);
+                }
+              }
+            }
           }
         } finally {
           await fileHandle.close();

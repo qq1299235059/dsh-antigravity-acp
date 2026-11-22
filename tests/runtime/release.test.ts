@@ -112,6 +112,164 @@ describe('release.ts', () => {
       expect(muslAsset?.executableName).toBe('antigravity');
     });
 
+    it('accepts all 8 real Google Antigravity CLI 1.5.x updater manifests and blocks cross-target mismatches', () => {
+      const releaseId = '1.5.14-5302690847260672';
+      const liveCases: Array<{
+        platform: NodeJS.Platform;
+        arch: string;
+        musl?: boolean;
+        folder: string;
+        filename: string;
+        target: string;
+        format: 'executable' | 'tar.gz';
+        executableName: 'agy.exe' | 'antigravity';
+      }> = [
+        {
+          platform: 'win32',
+          arch: 'x64',
+          folder: 'windows-x64',
+          filename: 'cli_windows_x64.exe',
+          target: 'windows_amd64',
+          format: 'executable',
+          executableName: 'agy.exe',
+        },
+        {
+          platform: 'win32',
+          arch: 'arm64',
+          folder: 'windows-arm',
+          filename: 'cli_windows_arm64.exe',
+          target: 'windows_arm64',
+          format: 'executable',
+          executableName: 'agy.exe',
+        },
+        {
+          platform: 'darwin',
+          arch: 'arm64',
+          folder: 'darwin-arm',
+          filename: 'cli_mac_arm64.tar.gz',
+          target: 'darwin_arm64',
+          format: 'tar.gz',
+          executableName: 'antigravity',
+        },
+        {
+          platform: 'darwin',
+          arch: 'x64',
+          folder: 'darwin-x64',
+          filename: 'cli_mac_x64.tar.gz',
+          target: 'darwin_amd64',
+          format: 'tar.gz',
+          executableName: 'antigravity',
+        },
+        {
+          platform: 'linux',
+          arch: 'x64',
+          folder: 'linux-x64',
+          filename: 'cli_linux_x64.tar.gz',
+          target: 'linux_amd64',
+          format: 'tar.gz',
+          executableName: 'antigravity',
+        },
+        {
+          platform: 'linux',
+          arch: 'arm64',
+          folder: 'linux-arm',
+          filename: 'cli_linux_arm64.tar.gz',
+          target: 'linux_arm64',
+          format: 'tar.gz',
+          executableName: 'antigravity',
+        },
+        {
+          platform: 'linux',
+          arch: 'x64',
+          musl: true,
+          folder: 'linux-x64-musl',
+          filename: 'cli_linux_x64_musl.tar.gz',
+          target: 'linux_amd64_musl',
+          format: 'tar.gz',
+          executableName: 'antigravity',
+        },
+        {
+          platform: 'linux',
+          arch: 'arm64',
+          musl: true,
+          folder: 'linux-arm-musl',
+          filename: 'cli_linux_arm64_musl.tar.gz',
+          target: 'linux_arm64_musl',
+          format: 'tar.gz',
+          executableName: 'antigravity',
+        },
+      ];
+
+      for (const c of liveCases) {
+        const asset = parseAntigravityCliRelease(
+          {
+            version: '1.5.14',
+            url: `https://storage.googleapis.com/antigravity-public/antigravity-cli/${releaseId}/${c.folder}/${c.filename}`,
+            sha512: VALID_SHA512,
+          },
+          c.platform,
+          c.arch,
+          c.musl,
+        );
+        expect(asset).toEqual({
+          version: '1.5.14',
+          releaseId,
+          target: c.target,
+          url: `https://storage.googleapis.com/antigravity-public/antigravity-cli/${releaseId}/${c.folder}/${c.filename}`,
+          sha512: VALID_SHA512.toLowerCase(),
+          executableName: c.executableName,
+          format: c.format,
+        });
+      }
+
+      // Cross-target filenames must still be rejected
+      expect(
+        parseAntigravityCliRelease(
+          {
+            version: '1.5.14',
+            url: `https://storage.googleapis.com/antigravity-public/antigravity-cli/${releaseId}/darwin-x64/cli_mac_arm64.tar.gz`,
+            sha512: VALID_SHA512,
+          },
+          'darwin',
+          'x64',
+        ),
+      ).toBeNull();
+      expect(
+        parseAntigravityCliRelease(
+          {
+            version: '1.5.14',
+            url: `https://storage.googleapis.com/antigravity-public/antigravity-cli/${releaseId}/linux-arm/cli_mac_arm64.tar.gz`,
+            sha512: VALID_SHA512,
+          },
+          'linux',
+          'arm64',
+        ),
+      ).toBeNull();
+      expect(
+        parseAntigravityCliRelease(
+          {
+            version: '1.5.14',
+            url: `https://storage.googleapis.com/antigravity-public/antigravity-cli/${releaseId}/windows-arm/cli_windows_x64.exe`,
+            sha512: VALID_SHA512,
+          },
+          'win32',
+          'arm64',
+        ),
+      ).toBeNull();
+      expect(
+        parseAntigravityCliRelease(
+          {
+            version: '1.5.14',
+            url: `https://storage.googleapis.com/antigravity-public/antigravity-cli/${releaseId}/linux-x64-musl/cli_linux_x64.tar.gz`,
+            sha512: VALID_SHA512,
+          },
+          'linux',
+          'x64',
+          true,
+        ),
+      ).toBeNull();
+    });
+
     it('rejects versions below MINIMUM_AGY_VERSION or non-strict semver', () => {
       expect(
         parseAntigravityCliRelease(

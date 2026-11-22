@@ -42,6 +42,7 @@ interface TargetDescriptor {
   readonly executableName: 'agy.exe' | 'antigravity';
   readonly format: 'executable' | 'tar.gz';
   readonly allowedFolders: ReadonlySet<string>;
+  readonly allowedFilenames: ReadonlySet<string>;
 }
 
 function resolveTargetDescriptor(
@@ -96,6 +97,14 @@ function resolveTargetDescriptor(
     folders.add(`${osName}-arm${dashSuffix}`);
   }
 
+  const fileOs = osName === 'darwin' ? 'mac' : osName;
+  const filenames = new Set<string>([
+    `cli_${fileOs}_${arch}${suffix}.${ext}`,
+    `cli_${osName}_${cpu}${suffix}.${ext}`,
+    `cli_${osName}_${arch}${suffix}.${ext}`,
+    `cli_${fileOs}_${cpu}${suffix}.${ext}`,
+  ]);
+
   return {
     os: osName,
     cpu,
@@ -106,6 +115,7 @@ function resolveTargetDescriptor(
     executableName,
     format,
     allowedFolders: folders,
+    allowedFilenames: filenames,
   };
 }
 
@@ -286,8 +296,7 @@ export function parseAntigravityCliRelease(
     return null;
   }
 
-  const expectedFilename = `cli_${descriptor.os}_${descriptor.cpu}${descriptor.suffix}.${descriptor.ext}`;
-  if (filename !== expectedFilename) {
+  if (!descriptor.allowedFilenames.has(filename)) {
     return null;
   }
 

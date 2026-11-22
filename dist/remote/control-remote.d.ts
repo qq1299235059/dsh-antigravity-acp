@@ -60,7 +60,7 @@ export declare class AntigravityControlService extends TypertRemoteService {
     private buildAuthSnapshot;
     private cancelActiveAuthInternal;
     status(): Promise<AntigravityControlStatusSnapshot>;
-    install(input?: AntigravityInstallInput): Promise<AntigravityControlStatusSnapshot>;
+    installCli(input?: AntigravityInstallInput): Promise<AntigravityControlStatusSnapshot>;
     installCancel(): Promise<AntigravityControlStatusSnapshot>;
     saveConfig(input: AntigravitySaveConfigInput): Promise<AntigravityControlStatusSnapshot>;
     authStart(input?: AntigravityAuthStartInput): Promise<AntigravityControlStatusSnapshot>;

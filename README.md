@@ -74,7 +74,7 @@ flowchart LR
 | `./llm` (`dsh-antigravity-acp/llm`) | `dist/llm-plugin.js` | Node 宿主 | 注册主模型 `LlmAdapter`（含私有 HTTP MCP Bridge）并响应运行时变更刷新模型列表 |
 | `./subagent` (`dsh-antigravity-acp/subagent`) | `dist/subagent-plugin.js` | Node 宿主 | 注册外部隔离 `SubagentProvider` |
 | `./client` (`dsh-antigravity-acp/client`) | `dist/client.js` | Web 浏览器 | 纯浏览器插件（`dsh.client.platform: "web"`），注入 `['slots', 'remote']`，挂载 `antigravityControl` 并注册 `settings.section` 与 `settings.section.icon`（`id: "antigravity-acp"`） |
-| `antigravityControl` (`TypertRemoteService`) | `src/remote/control-remote.ts` | Node 宿主 ↔ 浏览器 | 暴露 `status`、`install`、`installCancel`、`saveConfig`、`authStart`、`authSubmitCode`、`authCancel`、`logout`、`refreshModels`、`refreshQuota` 共 10 个严格 Codec RPC 方法 |
+| `antigravityControl` (`TypertRemoteService`) | `src/remote/control-remote.ts` | Node 宿主 ↔ 浏览器 | 暴露 `status`、`installCli`、`installCancel`、`saveConfig`、`authStart`、`authSubmitCode`、`authCancel`、`logout`、`refreshModels`、`refreshQuota` 共 10 个严格 Codec RPC 方法 |
 
 ---
 

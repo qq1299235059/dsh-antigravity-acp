@@ -24,7 +24,7 @@ window.__ModuleLoader__.load({
     ];
 
     const ONE_ARG_METHODS = [
-      'install',
+      'installCli',
       'saveConfig',
       'authStart',
       'authSubmitCode',
@@ -251,6 +251,8 @@ window.__ModuleLoader__.load({
   align-items: center;
   justify-content: center;
   gap: 6px;
+  white-space: nowrap;
+  flex-shrink: 0;
   text-decoration: none;
 }
 .agp-btn:hover:not(:disabled) {
@@ -843,7 +845,7 @@ window.__ModuleLoader__.load({
 
       const handleInstall = (clearBinaryPath) => {
         const input = clearBinaryPath ? { clearBinaryPath: true } : {};
-        return invokeAction(clearBinaryPath ? 'installManaged' : 'install', 'install', input, {
+        return invokeAction(clearBinaryPath ? 'installManaged' : 'install', 'installCli', input, {
           onSuccess: () => {
             if (clearBinaryPath) {
               runtimeDirtyRef.current = false;
