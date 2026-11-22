@@ -325,6 +325,15 @@ function createStatusFixture(overrides: Record<string, unknown> = {}) {
       proxyBypass: '',
       hasApiKey: false,
     },
+    subagent: {
+      providerName: 'antigravity',
+      toolName: 'antigravity_agent',
+      defaultModel: '',
+      defaultThoughtLevel: '',
+      permissionMode: 'default',
+      permissionFallback: 'reject',
+      systemPromptAppend: '',
+    },
     pool: {
       activeLeases: 0,
       idleWorkers: 1,
@@ -429,7 +438,7 @@ describe('dsh-antigravity-acp pure browser client (src/client.js)', () => {
 
     expect(mountCalls).toHaveLength(1);
     expect(mountCalls[0].package).toBe('dsh-antigravity-acp');
-    expect(mountCalls[0].descriptors).toHaveLength(13);
+    expect(mountCalls[0].descriptors).toHaveLength(14);
 
     const zeroArg = [
       'status',
@@ -441,7 +450,14 @@ describe('dsh-antigravity-acp pure browser client (src/client.js)', () => {
       'checkUpdate',
       'cancelPluginUpdate',
     ];
-    const oneArg = ['installCli', 'saveConfig', 'authStart', 'authSubmitCode', 'updatePlugin'];
+    const oneArg = [
+      'installCli',
+      'saveConfig',
+      'saveSubagentConfig',
+      'authStart',
+      'authSubmitCode',
+      'updatePlugin',
+    ];
     const reservedNamespaceMembers = new Set([
       'ctx',
       'empty',
@@ -732,6 +748,32 @@ describe('dsh-antigravity-acp pure browser client (src/client.js)', () => {
         });
         return { ok: true, value: currentStatus };
       },
+      saveSubagentConfig: async (...args) => {
+        rpcLog.push({ method: 'saveSubagentConfig', args });
+        const input = (args[0] ?? {}) as Record<string, unknown>;
+        currentStatus = createStatusFixture({
+          ...currentStatus,
+          subagent: {
+            ...currentStatus.subagent,
+            ...(typeof input['defaultModel'] === 'string'
+              ? { defaultModel: input['defaultModel'] }
+              : {}),
+            ...(typeof input['defaultThoughtLevel'] === 'string'
+              ? { defaultThoughtLevel: input['defaultThoughtLevel'] }
+              : {}),
+            ...(typeof input['permissionMode'] === 'string'
+              ? { permissionMode: input['permissionMode'] as 'default' | 'auto_edit' | 'auto' | 'yolo' }
+              : {}),
+            ...(typeof input['permissionFallback'] === 'string'
+              ? { permissionFallback: input['permissionFallback'] as 'reject' | 'cancel' }
+              : {}),
+            ...(typeof input['systemPromptAppend'] === 'string'
+              ? { systemPromptAppend: input['systemPromptAppend'] }
+              : {}),
+          },
+        });
+        return { ok: true, value: currentStatus };
+      },
       refreshModels: async (...args) => {
         rpcLog.push({ method: 'refreshModels', args });
         currentStatus = createStatusFixture({
@@ -986,6 +1028,54 @@ describe('dsh-antigravity-acp pure browser client (src/client.js)', () => {
     loaded.setLanguage('zh-CN');
     view.rerender({ callControl });
     expect(textContent(findByAttr(view.getTree(), 'data-acp-action', 'install'))).toContain('安装 / 更新 Antigravity CLI');
+
+    // Re-populate models after earlier logout test, then verify Subagent Configuration card interactions
+    await (
+      findByAttr(view.getTree(), 'data-acp-action', 'refresh-models').props.onClick as () => Promise<void>
+    )();
+    await flushMicrotasks();
+
+    const useBtn = findByAttr(view.getTree(), 'data-acp-action', 'use-subagent-model-gemini-3.1-pro');
+    expect(useBtn).toBeDefined();
+    await (useBtn.props.onClick as () => Promise<void>)();
+    await flushMicrotasks();
+    expect(rpcLog.some((e) => e.method === 'saveSubagentConfig')).toBe(true);
+    expect(findByAttr(view.getTree(), 'data-acp-selected-subagent', 'gemini-3.1-pro')).toBeDefined();
+    expect(textContent(findByAttr(view.getTree(), 'data-acp-subagent-model-badge', 'true'))).toContain(
+      'gemini-3.1-pro',
+    );
+
+    const thoughtChip = findByAttr(view.getTree(), 'data-acp-subagent-thought-chip', 'low');
+    expect(thoughtChip).toBeDefined();
+    (thoughtChip.props.onClick as () => void)();
+    (
+      findByAttr(view.getTree(), 'data-acp-select', 'subagent-permission-mode').props.onChange as (
+        e: unknown,
+      ) => void
+    )({ target: { value: 'auto_edit' } });
+    (
+      findByAttr(view.getTree(), 'data-acp-select', 'subagent-permission-fallback').props
+        .onChange as (e: unknown) => void
+    )({ target: { value: 'cancel' } });
+    (
+      findByAttr(view.getTree(), 'data-acp-input', 'subagent-system-prompt').props.onChange as (
+        e: unknown,
+      ) => void
+    )({ target: { value: 'Be concise.' } });
+
+    const saveSubagentBtn = findByAttr(view.getTree(), 'data-acp-action', 'save-subagent');
+    await (saveSubagentBtn.props.onClick as () => Promise<void>)();
+    await flushMicrotasks();
+    const lastSubSave = rpcLog.filter((e) => e.method === 'saveSubagentConfig').at(-1);
+    expect(lastSubSave?.args).toEqual([
+      {
+        defaultModel: 'gemini-3.1-pro',
+        defaultThoughtLevel: 'low',
+        permissionMode: 'auto_edit',
+        permissionFallback: 'cancel',
+        systemPromptAppend: 'Be concise.',
+      },
+    ]);
 
     view.unmount();
   });

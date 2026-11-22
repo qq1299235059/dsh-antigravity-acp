@@ -26,10 +26,18 @@ import {
   registerAntigravityControlRemote,
 } from './remote/control-remote.js';
 import {
+  loadSubagentUiOverrides,
   loadUiOverrides,
   mergeRuntimeConfigWithOverrides,
+  mergeSubagentConfigWithOverrides,
+  saveSubagentUiOverrides,
 } from './remote/ui-store.js';
-import { RuntimeConfigSchema, type AntigravityAuthMethod, type RuntimeConfig } from './shared/config.js';
+import {
+  RuntimeConfigSchema,
+  type AntigravityAuthMethod,
+  type RuntimeConfig,
+  type SubagentUiOverrides,
+} from './shared/config.js';
 import type {
   AcpClientHandle,
   AcpTurnCallbacks,
@@ -48,7 +56,10 @@ import type {
   AntigravityProfile,
   AntigravityRuntimeService,
   AntigravitySaveConfigInput,
+  AntigravitySaveSubagentConfigInput,
   AntigravityStatusSnapshot,
+  AntigravitySubagentDefaults,
+  AntigravitySubagentSettingsSnapshot,
   DiscoveredModel,
   QuotaSnapshot,
 } from './shared/contracts.js';
@@ -75,6 +86,7 @@ export interface RuntimeServiceOptions {
   readonly homeDir?: string;
   readonly platform?: NodeJS.Platform;
   readonly fetch?: typeof globalThis.fetch;
+  readonly initialSubagentOverrides?: SubagentUiOverrides;
 }
 
 function isHeadlessEnvironment(
@@ -181,6 +193,28 @@ export function createAntigravityRuntimeService(
   let lastQuota: QuotaSnapshot | undefined;
   let inflightDiscovery: Promise<readonly DiscoveredModel[]> | undefined;
   const changeListeners = new Set<() => void>();
+  let currentSubagentOverrides: SubagentUiOverrides = {
+    ...(options.initialSubagentOverrides ?? {}),
+  };
+  let subagentDefaults: AntigravitySubagentDefaults = {
+    providerName: 'antigravity',
+    toolName: 'antigravity_agent',
+    permissionMode: 'default',
+    permissionFallback: 'reject',
+  };
+  const subagentChangeListeners = new Set<() => void>();
+
+  const notifySubagentChanged = (): void => {
+    for (const listener of [...subagentChangeListeners]) {
+      try {
+        listener();
+      } catch (error: unknown) {
+        const msg =
+          error instanceof Error ? redactSensitiveText(error.message) : String(error);
+        options.logger?.warn(`antigravity subagent change listener failed: ${msg}`);
+      }
+    }
+  };
 
   const notifyChanged = (): void => {
     for (const listener of [...changeListeners]) {
@@ -595,6 +629,31 @@ export function createAntigravityRuntimeService(
       };
     },
 
+    getSubagentConfig(): SubagentUiOverrides {
+      return { ...currentSubagentOverrides };
+    },
+
+    updateSubagentConfig(overrides: SubagentUiOverrides): SubagentUiOverrides {
+      currentSubagentOverrides = { ...overrides };
+      notifySubagentChanged();
+      return { ...currentSubagentOverrides };
+    },
+
+    setSubagentDefaults(defaults: AntigravitySubagentDefaults): void {
+      subagentDefaults = { ...defaults };
+    },
+
+    getSubagentDefaults(): AntigravitySubagentDefaults {
+      return { ...subagentDefaults };
+    },
+
+    onSubagentChanged(listener: () => void): () => void {
+      subagentChangeListeners.add(listener);
+      return () => {
+        subagentChangeListeners.delete(listener);
+      };
+    },
+
     async dispose(): Promise<void> {
       if (disposed) {
         return;
@@ -603,6 +662,7 @@ export function createAntigravityRuntimeService(
       disposeController.abort();
       cachedModels = undefined;
       changeListeners.clear();
+      subagentChangeListeners.clear();
       await pool.dispose();
     },
   };
@@ -618,8 +678,12 @@ export function apply(ctx: Context, config: RuntimeConfig): void {
   const logger = ctx.logger(name);
   const profileDir = resolveProfilePaths(config).profileDir;
   const uiOverrides = loadUiOverrides(profileDir);
+  const initialSubagentOverrides = loadSubagentUiOverrides(profileDir);
   const effectiveConfig = mergeRuntimeConfigWithOverrides(config, uiOverrides);
-  const service = createAntigravityRuntimeService(ctx.subprocess, effectiveConfig, { logger });
+  const service = createAntigravityRuntimeService(ctx.subprocess, effectiveConfig, {
+    logger,
+    initialSubagentOverrides,
+  });
 
   ctx.provide('antigravityRuntime', service);
 
@@ -661,7 +725,6 @@ export {
 
 export {
   AuthMethodSchema,
-  LlmPluginConfigSchema,
   PermissionFallbackSchema,
   PermissionModeSchema,
   RuntimeConfigSchema,
@@ -669,13 +732,11 @@ export {
   type AntigravityAuthMethod,
   type AntigravityPermissionFallback,
   type AntigravityPermissionMode,
-  type LlmPluginConfig,
-  type LlmPluginConfigInput,
-  type ModelOverrideConfig,
   type RuntimeConfig,
   type RuntimeConfigInput,
   type SubagentPluginConfig,
   type SubagentPluginConfigInput,
+  type SubagentUiOverrides,
 } from './shared/config.js';
 
 export type {
@@ -703,7 +764,10 @@ export type {
   AntigravityProfile,
   AntigravityRuntimeService,
   AntigravitySaveConfigInput,
+  AntigravitySaveSubagentConfigInput,
   AntigravityStatusSnapshot,
+  AntigravitySubagentDefaults,
+  AntigravitySubagentSettingsSnapshot,
   DiscoveredModel,
   QuotaSnapshot,
   QuotaWindow,
@@ -750,8 +814,11 @@ export {
 export {
   UI_CONFIG_FILENAME,
   UI_SECRETS_FILENAME,
+  loadSubagentUiOverrides,
   loadUiOverrides,
   mergeRuntimeConfigWithOverrides,
+  mergeSubagentConfigWithOverrides,
+  saveSubagentUiOverrides,
   saveUiOverrides,
 } from './remote/ui-store.js';
 

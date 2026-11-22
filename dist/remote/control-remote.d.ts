@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { TypertRemoteService, type InvocationDescriptor } from '@deepseek-ai/dsh-typert-protocol';
 import { type PluginManagerLike } from '../runtime/updater.js';
-import type { AntigravityAuthStartInput, AntigravityAuthSubmitCodeInput, AntigravityControlStatusSnapshot, AntigravityInstallInput, AntigravityPluginUpdateInput, AntigravityRuntimeService, AntigravitySaveConfigInput } from '../shared/contracts.js';
+import type { AntigravityAuthStartInput, AntigravityAuthSubmitCodeInput, AntigravityControlStatusSnapshot, AntigravityInstallInput, AntigravityPluginUpdateInput, AntigravityRuntimeService, AntigravitySaveConfigInput, AntigravitySaveSubagentConfigInput } from '../shared/contracts.js';
 export declare const ANTIGRAVITY_CONTROL_PACKAGE = "dsh-antigravity-acp";
 export declare const ANTIGRAVITY_CONTROL_SERVICE_KEY = "antigravityControl";
 export declare const ANTIGRAVITY_CONTROL_NAMESPACE = "antigravityControl";
@@ -88,10 +88,12 @@ export declare class AntigravityControlService extends TypertRemoteService {
     private readLocalPluginInfoSafe;
     private formatPluginUpdateSnapshot;
     private cancelActiveAuthInternal;
+    private buildSubagentSnapshot;
     status(): Promise<AntigravityControlStatusSnapshot>;
     installCli(input?: AntigravityInstallInput): Promise<AntigravityControlStatusSnapshot>;
     installCancel(): Promise<AntigravityControlStatusSnapshot>;
     saveConfig(input: AntigravitySaveConfigInput): Promise<AntigravityControlStatusSnapshot>;
+    saveSubagentConfig(input: AntigravitySaveSubagentConfigInput): Promise<AntigravityControlStatusSnapshot>;
     authStart(input?: AntigravityAuthStartInput): Promise<AntigravityControlStatusSnapshot>;
     authSubmitCode(input: AntigravityAuthSubmitCodeInput): Promise<AntigravityControlStatusSnapshot>;
     authCancel(): Promise<AntigravityControlStatusSnapshot>;

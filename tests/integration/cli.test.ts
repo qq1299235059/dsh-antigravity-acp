@@ -240,7 +240,7 @@ describe('standalone CLI (src/cli.ts)', () => {
         updateAvailable: boolean;
       };
       expect(parsed.packageName).toBe('dsh-antigravity-acp');
-      expect(parsed.currentVersion).toBe('0.2.0');
+      expect(parsed.currentVersion).toBe('0.3.0');
       expect(parsed.latestVersion).toBe('9.9.9');
       expect(parsed.updateAvailable).toBe(true);
 

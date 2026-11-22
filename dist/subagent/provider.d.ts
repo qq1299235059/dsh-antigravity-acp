@@ -24,13 +24,13 @@ export declare function resolveSubagentPermission(request: acp.RequestPermission
  */
 export declare class AntigravitySubagentProvider implements SubagentProvider {
     private readonly runtime;
-    private readonly config;
     private readonly attachments?;
     private readonly logger?;
     readonly name: string;
     readonly capabilities: SubagentCapabilities;
     readonly inheritsParentContext = false;
-    constructor(runtime: AntigravityRuntimeService, config: SubagentPluginConfig, attachments?: AttachmentStore | undefined, logger?: SubagentProviderLogger | undefined);
+    private readonly resolveConfig;
+    constructor(runtime: AntigravityRuntimeService, configOrResolver: SubagentPluginConfig | (() => SubagentPluginConfig), attachments?: AttachmentStore | undefined, logger?: SubagentProviderLogger | undefined);
     start(request: ResolvedSubagentStartRequest): Promise<SubagentRun>;
 }
 //# sourceMappingURL=provider.d.ts.map

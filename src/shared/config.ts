@@ -13,16 +13,6 @@ export type AntigravityPermissionMode = 'default' | 'auto_edit' | 'auto' | 'yolo
 /** Fallback decision when `permissionMode` is `'default'` and interactive approval is unavailable. */
 export type AntigravityPermissionFallback = 'reject' | 'cancel';
 
-/** Per-model metadata override configured for the LLM plugin. */
-export interface ModelOverrideConfig {
-  name?: string;
-  description?: string;
-  contextWindow?: number;
-  defaultMaxTokens?: number;
-  inputModalities?: readonly ('text' | 'image')[];
-  defaultThoughtLevel?: string;
-}
-
 /** Configuration for the shared `antigravityRuntime` Cordis service. */
 export interface RuntimeConfig {
   authMethod: AntigravityAuthMethod;
@@ -50,26 +40,10 @@ export interface RuntimeConfig {
 /** Input type accepted by {@link RuntimeConfigSchema}. */
 export type RuntimeConfigInput = Partial<RuntimeConfig>;
 
-/** Configuration for the `dsh-antigravity-acp/llm` adapter plugin. */
-export interface LlmPluginConfig {
-  providerId: string;
-  providerName: string;
-  defaultModel?: string;
-  contextWindow: number;
-  reuseSessions: boolean;
-  ignoreUnsupportedOptions: boolean;
-  toolTimeoutMs: number;
-  bridgeParkSettleMs: number;
-  maxPromptBytes: number;
-  modelOverrides: Record<string, ModelOverrideConfig>;
-}
-
-/** Input type accepted by {@link LlmPluginConfigSchema}. */
-export type LlmPluginConfigInput = Partial<LlmPluginConfig>;
-
-/** Configuration for the `dsh-antigravity-acp/subagent` provider plugin. */
+/** Configuration for the `dsh-antigravity-acp/subagent` provider & tool plugin. */
 export interface SubagentPluginConfig {
   providerName: string;
+  toolName: string;
   permissionMode: AntigravityPermissionMode;
   permissionFallback: AntigravityPermissionFallback;
   defaultModel?: string;
@@ -81,6 +55,15 @@ export interface SubagentPluginConfig {
 
 /** Input type accepted by {@link SubagentPluginConfigSchema}. */
 export type SubagentPluginConfigInput = Partial<SubagentPluginConfig>;
+
+/** UI-persisted overrides for Antigravity subagent defaults. */
+export interface SubagentUiOverrides {
+  readonly defaultModel?: string;
+  readonly defaultThoughtLevel?: string;
+  readonly permissionMode?: AntigravityPermissionMode;
+  readonly permissionFallback?: AntigravityPermissionFallback;
+  readonly systemPromptAppend?: string;
+}
 
 export const AuthMethodSchema: z<AntigravityAuthMethod> = z
   .union([
@@ -106,15 +89,6 @@ export const PermissionFallbackSchema: z<AntigravityPermissionFallback> = z
   .union([z.const('reject'), z.const('cancel')])
   .default('reject')
   .description('Fallback decision when permissionMode is default.');
-
-const ModelOverrideConfigSchema = z.object({
-  name: z.string().min(1),
-  description: z.string(),
-  contextWindow: z.natural().min(1),
-  defaultMaxTokens: z.natural().min(1),
-  inputModalities: z.array(z.union([z.const('text'), z.const('image')])),
-  defaultThoughtLevel: z.string().min(1),
-});
 
 export const RuntimeConfigSchema: z<RuntimeConfigInput, RuntimeConfig> = z.object({
   authMethod: AuthMethodSchema,
@@ -144,24 +118,9 @@ export const RuntimeConfigSchema: z<RuntimeConfigInput, RuntimeConfig> = z.objec
   autoWarmup: z.boolean().default(false).description('Warm up runtime binary and model catalog on service startup.'),
 }) as unknown as z<RuntimeConfigInput, RuntimeConfig>;
 
-export const LlmPluginConfigSchema: z<LlmPluginConfigInput, LlmPluginConfig> = z.object({
-  providerId: z.string().min(1).default('antigravity-acp').description('Registered DSH LLM provider route id.'),
-  providerName: z.string().min(1).default('Antigravity ACP').description('Display name for the registered LLM provider.'),
-  defaultModel: z.string().min(1).description('Fallback model id when callers select an unspecified model.'),
-  contextWindow: z.natural().min(1).default(128_000).description('Default context window reported for discovered models.'),
-  reuseSessions: z.boolean().default(true).description('Reuse ACP sessions when request history strictly appends to the prior turn.'),
-  ignoreUnsupportedOptions: z.boolean().default(true).description('Ignore unsupported sampling options like temperature/stop instead of throwing.'),
-  toolTimeoutMs: z.natural().min(1).default(300_000).description('Timeout waiting for DSH tool execution roundtrip in milliseconds.'),
-  bridgeParkSettleMs: z.natural().min(0).default(50).description('Grace settle window for parking MCP bridge tool calls in milliseconds.'),
-  maxPromptBytes: z.natural().min(1).default(1_000_000).description('Maximum serialized prompt payload size in bytes.'),
-  modelOverrides: z
-    .dict(ModelOverrideConfigSchema)
-    .default({})
-    .description('Per-model metadata overrides keyed by model id.'),
-}) as unknown as z<LlmPluginConfigInput, LlmPluginConfig>;
-
 export const SubagentPluginConfigSchema: z<SubagentPluginConfigInput, SubagentPluginConfig> = z.object({
   providerName: z.string().min(1).default('antigravity').description('Registered DSH subagent provider name.'),
+  toolName: z.string().min(1).default('antigravity_agent').description('Registered DSH tool name exposed to the active session model.'),
   permissionMode: PermissionModeSchema,
   permissionFallback: PermissionFallbackSchema,
   defaultModel: z.string().min(1).description('Default model id for spawned subagent sessions.'),

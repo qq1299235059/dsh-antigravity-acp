@@ -31,6 +31,13 @@ import {
   AntigravitySubagentProvider,
   type SubagentProviderLogger,
 } from '../../src/subagent/provider.js';
+import { createAntigravitySubagentTool } from '../../src/subagent/tool.js';
+import {
+  registerAntigravitySubagentSkill,
+  registerAntigravitySystemPrompt,
+} from '../../src/subagent/skill.js';
+import { SystemPrompt } from '@deepseek-ai/dsh-system-prompt';
+import { ToolsService, type ToolExecution } from '@deepseek-ai/dsh-tools';
 
 const FAKE_SERVER_PATH = fileURLToPath(new URL('../acp/fake-agy-server.mjs', import.meta.url));
 
@@ -484,5 +491,196 @@ describe('AntigravitySubagentProvider', () => {
     expect(echoed.prompt[2].type).toBe('text');
     expect(echoed.prompt[2].text).toContain('image omitted');
     await run.dispose();
+  });
+
+  it('supports antigravity_agent tool across legacy nested and flattened startActivation shapes, per-call overrides, abort cleanup, and error propagation', async () => {
+    const h = await createHarness({
+      fakeEnv: { FAKE_AGY_ECHO_CONTEXT: '1' },
+      subagentConfig: {
+        defaultModel: 'gemini-2.5-pro',
+        defaultThoughtLevel: 'medium',
+        permissionMode: 'yolo',
+      },
+    });
+
+    // Legacy 0.2.2-rc.1 shape (`startActivation` checks `spec.request`)
+    const legacySubagents = {
+      startActivation(spec: {
+        provider: string;
+        label: string;
+        delivery: string;
+        signal: AbortSignal;
+        request: { cwd?: string; prompt: any[]; parent: Agent };
+      }) {
+        const prompt = spec.request.prompt;
+        const cwd = spec.request.cwd ?? h.workDir;
+        return h.provider
+          .start({
+            cwd,
+            prompt,
+            parent: spec.request.parent,
+            label: spec.label,
+            signal: spec.signal,
+          })
+          .then((run) => ({
+            childId: run.id,
+            name: spec.label,
+            result: run.result,
+            dispose: () => run.dispose(),
+          }));
+      },
+    } as unknown as import('@deepseek-ai/dsh-subagent').SubagentRuntime;
+
+    const tool = createAntigravitySubagentTool({
+      subagents: legacySubagents,
+      getConfig: () =>
+        SubagentPluginConfigSchema({
+          defaultModel: 'gemini-2.5-pro',
+          defaultThoughtLevel: 'medium',
+          permissionMode: 'yolo',
+        }),
+    });
+
+    expect(tool.isConcurrencySafe?.({ description: 'x', prompt: 'y' })).toBe(true);
+    expect(tool.presentCall?.({ description: 'Analyze code', prompt: 'p' })).toMatchObject({
+      card: 'generic',
+      title: 'Antigravity: Analyze code',
+    });
+    expect(
+      tool.presentResult?.(
+        { description: 'Analyze code', prompt: 'p' },
+        { content: [{ type: 'text', text: 'done' }], isError: false },
+      ),
+    ).toMatchObject({
+      card: 'generic',
+      title: 'Antigravity Completed: Analyze code',
+    });
+
+    const exec = {
+      agent: makeParent(),
+      signal: new AbortController().signal,
+      callId: brandString('tc-1') as ToolExecution['callId'],
+      rootCallId: brandString('tc-1') as ToolExecution['callId'],
+      name: 'antigravity_agent',
+      arguments: {},
+      token: Symbol('exec') as ToolExecution['token'],
+      deferContext: () => {},
+      concludeTurn: () => {},
+    };
+
+    const res = (await tool.execute(
+      {
+        description: 'Per-call override',
+        prompt: 'Check override behavior',
+        cwd: h.workDir,
+        model: 'gemini-3-pro',
+        thought_level: 'high',
+      },
+      exec,
+    )) as { model?: string; thoughtLevel?: string; outputText: string };
+
+    expect(res.model).toBe('gemini-3-pro');
+    expect(res.thoughtLevel).toBe('high');
+    const echoed = JSON.parse(res.outputText) as { model?: string; thoughtLevel?: string };
+    expect(echoed.model).toBe('gemini-3-pro');
+    expect(echoed.thoughtLevel).toBe('high');
+
+    // Abort during slow run cleans up spawned ACP client
+    const slowH = await createHarness({
+      fakeEnv: { FAKE_AGY_DELAY_MS: '5000' },
+      subagentConfig: { disposeEofGraceMs: 150, disposeGraceMs: 200 },
+    });
+    const abortCtrl = new AbortController();
+    let childStarted!: () => void;
+    const childStartedPromise = new Promise<void>((resolve) => {
+      childStarted = resolve;
+    });
+    const slowTool = createAntigravitySubagentTool({
+      subagents: {
+        startActivation: async (spec: any) => {
+          const run = await slowH.provider.start({
+            cwd: spec.cwd ?? slowH.workDir,
+            prompt: spec.prompt,
+            parent: spec.parent,
+            label: spec.label,
+            signal: spec.signal,
+          });
+          childStarted();
+          return {
+            childId: run.id,
+            name: run.id,
+            result: run.result,
+            dispose: () => run.dispose(),
+          };
+        },
+      } as unknown as import('@deepseek-ai/dsh-subagent').SubagentRuntime,
+      getConfig: () => SubagentPluginConfigSchema({}),
+    });
+    void childStartedPromise.then(() => abortCtrl.abort(new Error('User cancelled')));
+    await expect(
+      slowTool.execute(
+        { description: 'Slow job', prompt: 'Wait', cwd: slowH.workDir },
+        { ...exec, signal: abortCtrl.signal },
+      ),
+    ).rejects.toThrow(/User cancelled|aborted/i);
+    expect(slowH.spawnedClients.every((c) => c.isClosed)).toBe(true);
+  });
+
+  it('registers antigravity-subagent via skill.register fallback and hides systemPrompt section when tool is restricted', async () => {
+    const registered: Array<{ name: string; content: string }> = [];
+    const disposeSkill = registerAntigravitySubagentSkill({
+      skills: {
+        register: (skill) => {
+          registered.push({ name: skill.name, content: skill.content });
+          return () => {};
+        },
+      },
+      getConfig: () => SubagentPluginConfigSchema({ defaultModel: 'gemini-3-pro' }),
+    });
+    expect(registered).toHaveLength(1);
+    expect(registered[0].name).toBe('antigravity-subagent');
+    expect(registered[0].content).toContain('gemini-3-pro');
+    disposeSkill();
+
+    const ctx = new Context();
+    await ctx.plugin(ToolsService);
+    await ctx.plugin(SystemPrompt);
+    ctx.tools.setExecutor({
+      describe: (tools) => ({
+        schemas: tools.map((t) => ({
+          name: t.name,
+          description: t.description,
+          parameters: t.parameters,
+        })),
+        knownNames: tools.map((t) => t.name),
+      }),
+      execute: async () => ({
+        results: [],
+        additionalContexts: [],
+        concluded: false,
+      }),
+    });
+    const tool = createAntigravitySubagentTool({
+      subagents: {} as unknown as import('@deepseek-ai/dsh-subagent').SubagentRuntime,
+      getConfig: () => SubagentPluginConfigSchema({}),
+    });
+    const unregTool = ctx.tools.register(tool);
+    const unregPrompt = registerAntigravitySystemPrompt({
+      systemPrompt: ctx.systemPrompt,
+      tools: ctx.tools,
+      toolDefinition: tool,
+      getConfig: () => SubagentPluginConfigSchema({}),
+    });
+
+    const visiblePrompt = await ctx.systemPrompt.assemble();
+    expect(visiblePrompt.sections.some((s) => s.name === 'tool:antigravity_agent')).toBe(true);
+
+    unregTool();
+    const hiddenPrompt = await ctx.systemPrompt.assemble();
+    const hiddenSection = hiddenPrompt.sections.find(
+      (s) => s.name === 'tool:antigravity_agent',
+    );
+    expect(!hiddenSection || hiddenSection.text === '').toBe(true);
+    unregPrompt();
   });
 });

@@ -1,9 +1,19 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { validateProxyUrl, writeFileAtomic } from '../runtime/profile.js';
-import type { AntigravityAuthMethod, RuntimeConfig } from '../shared/config.js';
-import type { AntigravitySaveConfigInput } from '../shared/contracts.js';
+import type {
+  AntigravityAuthMethod,
+  AntigravityPermissionFallback,
+  AntigravityPermissionMode,
+  RuntimeConfig,
+  SubagentUiOverrides,
+} from '../shared/config.js';
+import type {
+  AntigravitySaveConfigInput,
+  AntigravitySaveSubagentConfigInput,
+} from '../shared/contracts.js';
 import { AntigravityAcpError } from '../shared/errors.js';
+import { mergeSubagentConfigWithOverrides } from '../subagent/overrides.js';
 
 export const UI_CONFIG_FILENAME = 'ui-config.json';
 export const UI_SECRETS_FILENAME = 'ui-secrets.json';
@@ -14,6 +24,34 @@ const VALID_AUTH_METHODS = new Set<AntigravityAuthMethod>([
   'gemini-api-key',
   'agent-platform',
 ]);
+
+const VALID_PERMISSION_MODES = new Set<AntigravityPermissionMode>([
+  'default',
+  'auto_edit',
+  'auto',
+  'yolo',
+]);
+
+const VALID_PERMISSION_FALLBACKS = new Set<AntigravityPermissionFallback>([
+  'reject',
+  'cancel',
+]);
+
+const SUBAGENT_STRING_FIELDS = [
+  'defaultModel',
+  'defaultThoughtLevel',
+  'systemPromptAppend',
+] as const;
+
+type OptionalSubagentStringField = (typeof SUBAGENT_STRING_FIELDS)[number];
+
+interface PersistedSubagentUiConfig {
+  defaultModel?: string;
+  defaultThoughtLevel?: string;
+  permissionMode?: AntigravityPermissionMode;
+  permissionFallback?: AntigravityPermissionFallback;
+  systemPromptAppend?: string;
+}
 
 const OPTIONAL_STRING_FIELDS = [
   'binaryPath',
@@ -33,6 +71,7 @@ interface PersistedUiConfig {
   gcpLocation?: string;
   proxyUrl?: string;
   proxyBypass?: string;
+  subagent?: PersistedSubagentUiConfig;
 }
 
 interface PersistedUiSecrets {
@@ -93,6 +132,37 @@ function normalizeNonEmptyString(value: unknown): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
+function parsePersistedSubagentUiConfig(raw: unknown): PersistedSubagentUiConfig | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return undefined;
+  }
+  const record = raw as Record<string, unknown>;
+  const parsed: PersistedSubagentUiConfig = {};
+
+  for (const field of SUBAGENT_STRING_FIELDS) {
+    const normalized = normalizeNonEmptyString(record[field]);
+    if (normalized !== undefined) {
+      parsed[field] = normalized;
+    }
+  }
+
+  if (
+    typeof record['permissionMode'] === 'string' &&
+    VALID_PERMISSION_MODES.has(record['permissionMode'] as AntigravityPermissionMode)
+  ) {
+    parsed.permissionMode = record['permissionMode'] as AntigravityPermissionMode;
+  }
+
+  if (
+    typeof record['permissionFallback'] === 'string' &&
+    VALID_PERMISSION_FALLBACKS.has(record['permissionFallback'] as AntigravityPermissionFallback)
+  ) {
+    parsed.permissionFallback = record['permissionFallback'] as AntigravityPermissionFallback;
+  }
+
+  return Object.keys(parsed).length > 0 ? parsed : undefined;
+}
+
 function parsePersistedUiConfig(raw: Record<string, unknown> | null): PersistedUiConfig {
   const parsed: PersistedUiConfig = {};
   if (!raw) {
@@ -124,6 +194,11 @@ function parsePersistedUiConfig(raw: Record<string, unknown> | null): PersistedU
     VALID_AUTH_METHODS.has(raw['authMethod'] as AntigravityAuthMethod)
   ) {
     parsed.authMethod = raw['authMethod'] as AntigravityAuthMethod;
+  }
+
+  const subagent = parsePersistedSubagentUiConfig(raw['subagent']);
+  if (subagent !== undefined) {
+    parsed.subagent = subagent;
   }
 
   return parsed;
@@ -316,3 +391,131 @@ export function mergeRuntimeConfigWithOverrides(
 
   return merged;
 }
+
+function buildSubagentOverridesFromConfig(configPart: PersistedUiConfig): SubagentUiOverrides {
+  const src = configPart.subagent;
+  if (!src) {
+    return {};
+  }
+  return {
+    ...(src.defaultModel !== undefined ? { defaultModel: src.defaultModel } : {}),
+    ...(src.defaultThoughtLevel !== undefined
+      ? { defaultThoughtLevel: src.defaultThoughtLevel }
+      : {}),
+    ...(src.permissionMode !== undefined ? { permissionMode: src.permissionMode } : {}),
+    ...(src.permissionFallback !== undefined
+      ? { permissionFallback: src.permissionFallback }
+      : {}),
+    ...(src.systemPromptAppend !== undefined
+      ? { systemPromptAppend: src.systemPromptAppend }
+      : {}),
+  };
+}
+
+/**
+ * Load persisted UI subagent overrides from `<profileDir>/ui-config.json`.
+ * Wait-free and resilient to missing or corrupt files; omits unset keys.
+ */
+export function loadSubagentUiOverrides(
+  profileDir: string,
+  _platform: NodeJS.Platform = process.platform,
+): SubagentUiOverrides {
+  const configPath = path.join(profileDir, UI_CONFIG_FILENAME);
+  const configPart = parsePersistedUiConfig(safeReadPlainJsonObject(configPath));
+  return buildSubagentOverridesFromConfig(configPart);
+}
+
+function applyOptionalSubagentStringPatch(
+  target: PersistedSubagentUiConfig,
+  field: OptionalSubagentStringField,
+  value: string | undefined,
+): boolean {
+  if (value === undefined) {
+    return false;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    if (field in target) {
+      delete target[field];
+      return true;
+    }
+    return false;
+  }
+  if (target[field] === trimmed) {
+    return false;
+  }
+  target[field] = trimmed;
+  return true;
+}
+
+/**
+ * Persist UI subagent overrides into `<profileDir>/ui-config.json` without clobbering runtime settings.
+ * Empty strings clear optional text overrides (`defaultModel`, `defaultThoughtLevel`, `systemPromptAppend`).
+ */
+export async function saveSubagentUiOverrides(
+  profileDir: string,
+  patch: AntigravitySaveSubagentConfigInput,
+  platform: NodeJS.Platform = process.platform,
+): Promise<SubagentUiOverrides> {
+  return withUiStoreLock(profileDir, platform, async () => {
+    const configPath = path.join(profileDir, UI_CONFIG_FILENAME);
+    const nextConfig = parsePersistedUiConfig(safeReadPlainJsonObject(configPath));
+    const nextSubagent: PersistedSubagentUiConfig = { ...(nextConfig.subagent ?? {}) };
+
+    let dirty = false;
+    for (const field of SUBAGENT_STRING_FIELDS) {
+      if (patch[field] !== undefined) {
+        if (applyOptionalSubagentStringPatch(nextSubagent, field, patch[field])) {
+          dirty = true;
+        }
+      }
+    }
+
+    if (patch.permissionMode !== undefined) {
+      if (!VALID_PERMISSION_MODES.has(patch.permissionMode)) {
+        throw new AntigravityAcpError(
+          `Unsupported permissionMode: ${String(patch.permissionMode)}`,
+          'INVALID_REQUEST',
+        );
+      }
+      if (nextSubagent.permissionMode !== patch.permissionMode) {
+        nextSubagent.permissionMode = patch.permissionMode;
+        dirty = true;
+      }
+    }
+
+    if (patch.permissionFallback !== undefined) {
+      if (!VALID_PERMISSION_FALLBACKS.has(patch.permissionFallback)) {
+        throw new AntigravityAcpError(
+          `Unsupported permissionFallback: ${String(patch.permissionFallback)}`,
+          'INVALID_REQUEST',
+        );
+      }
+      if (nextSubagent.permissionFallback !== patch.permissionFallback) {
+        nextSubagent.permissionFallback = patch.permissionFallback;
+        dirty = true;
+      }
+    }
+
+    if (Object.keys(nextSubagent).length > 0) {
+      nextConfig.subagent = nextSubagent;
+    } else if ('subagent' in nextConfig) {
+      delete nextConfig.subagent;
+    }
+
+    if (dirty) {
+      const dirMode = platform === 'win32' ? undefined : 0o700;
+      await fs.promises.mkdir(profileDir, { recursive: true, mode: dirMode });
+      await writeFileAtomic(
+        configPath,
+        `${JSON.stringify(nextConfig, null, 2)}\n`,
+        platform,
+        0o600,
+      );
+    }
+
+    return buildSubagentOverridesFromConfig(nextConfig);
+  });
+}
+
+export { mergeSubagentConfigWithOverrides };

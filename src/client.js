@@ -28,6 +28,7 @@ window.__ModuleLoader__.load({
     const ONE_ARG_METHODS = [
       'installCli',
       'saveConfig',
+      'saveSubagentConfig',
       'authStart',
       'authSubmitCode',
       'updatePlugin',
@@ -226,9 +227,43 @@ window.__ModuleLoader__.load({
   font: inherit;
   font-size: 13px;
 }
-.agp-input:focus {
+.agp-input:focus,
+.agp-textarea:focus,
+.agp-select:focus {
   outline: none;
   border-color: var(--dsw-alias-state-business-primary, #4176e6);
+}
+.agp-textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 68px;
+  padding: 8px 10px;
+  border-radius: var(--dsw-radius-md, 10px);
+  border: 0.5px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.16));
+  background: var(--dsw-alias-bg-layer-1, #ffffff);
+  color: var(--dsw-alias-label-primary, #111827);
+  font: inherit;
+  font-size: 13px;
+  line-height: 18px;
+  resize: vertical;
+}
+.agp-select {
+  box-sizing: border-box;
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: var(--dsw-radius-md, 10px);
+  border: 0.5px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.16));
+  background: var(--dsw-alias-bg-layer-1, #ffffff);
+  color: var(--dsw-alias-label-primary, #111827);
+  font: inherit;
+  font-size: 13px;
+}
+.agp-chip-btn {
+  cursor: pointer;
+}
+.agp-chip-btn:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover, rgba(0, 0, 0, 0.06));
 }
 .agp-checkbox-row {
   display: inline-flex;
@@ -414,7 +449,7 @@ window.__ModuleLoader__.load({
 
     const COPY_ZH = {
       title: 'Antigravity ACP',
-      subtitle: '安装与管理 Antigravity CLI (agy >= 1.5.0)，配置 OAuth / API Key 鉴权并查看模型与配额。',
+      subtitle: '安装与管理 Antigravity CLI (agy >= 1.5.0)，配置 OAuth 鉴权、Subagent 模型与权限，并通过 antigravity_agent 工具与技能直接调用。',
       refreshStatus: '刷新状态',
       loading: '正在加载 Antigravity ACP 状态…',
       pluginTitle: '插件版本与更新',
@@ -514,6 +549,37 @@ window.__ModuleLoader__.load({
       refreshQuotaBtn: '刷新配额',
       modelsHeading: '可用模型',
       defaultModelBadge: '默认',
+      selectedSubagentBadge: '当前 Subagent',
+      useAsSubagentModelBtn: '设为 Subagent 模型',
+      subagentTitle: 'Subagent 配置（工具与模型）',
+      subagentActiveModelTagPrefix: '模型: ',
+      subagentFollowCliDefault: '跟随 CLI 默认',
+      subagentToolInfoPrefix: '当前会话模型通过工具 ',
+      subagentToolInfoMid: ' 与 Skill ',
+      subagentToolInfoSuffix: ' 直接调用 Antigravity Subagent（已移除主模型直连以规避风控）。',
+      subagentPresetModelLabel: '从已发现模型选择',
+      subagentModelAutoOption: '（跟随 ACP CLI 默认 / 下方自定义）',
+      subagentDefaultModelLabel: 'Subagent 目标模型 ID（defaultModel）',
+      subagentDefaultModelPlaceholder: '留空跟随 CLI 默认，或输入如 gemini-2.5-pro / gemini-3-pro',
+      subagentDefaultThoughtLabel: '思考深度（defaultThoughtLevel）',
+      subagentDefaultThoughtPlaceholder: '留空使用模型默认，或填写 low / medium / high',
+      subagentPermissionModeLabel: '工具权限策略（permissionMode）',
+      subagentPermissionModeOptions: {
+        default: 'default（需确认，非交互下按回退策略拒绝/取消）',
+        auto_edit: 'auto_edit（自动允许工作区读写/编辑，推荐）',
+        auto: 'auto（自动决策常规工具调用）',
+        yolo: 'yolo（完全自动放行，慎用）',
+      },
+      subagentPermissionFallbackLabel: 'default 模式回退决策',
+      subagentPermissionFallbackOptions: {
+        reject: 'reject（拒绝本次受限操作并由模型调整）',
+        cancel: 'cancel（直接取消本次子任务）',
+      },
+      subagentSystemPromptLabel: '附加系统提示词（systemPromptAppend，可选）',
+      subagentSystemPromptPlaceholder: '例如：保持改动最小化，修改后运行相关测试并在汇报中给出文件路径',
+      saveSubagentBtn: '保存 Subagent 配置',
+      clearSubagentModelBtn: '重置为默认',
+      subagentSavedNotice: 'Subagent 配置已保存，下一次工具调用立即生效。',
       noModelsHint: '暂无已发现模型；安装 CLI 并完成登录后可点击“刷新模型列表”。',
       quotaHeading: '配额窗口',
       quotaExhaustedBadge: '部分配额已耗尽',
@@ -525,7 +591,7 @@ window.__ModuleLoader__.load({
 
     const COPY_EN = {
       title: 'Antigravity ACP',
-      subtitle: 'Install and manage Antigravity CLI (agy >= 1.5.0), configure OAuth / API Key auth, and inspect models & quota.',
+      subtitle: 'Install and manage Antigravity CLI (agy >= 1.5.0), configure OAuth auth & Antigravity subagent model/permissions, and invoke via antigravity_agent tool & skill.',
       refreshStatus: 'Refresh',
       loading: 'Loading Antigravity ACP status…',
       pluginTitle: 'Plugin Version & Updates',
@@ -625,6 +691,37 @@ window.__ModuleLoader__.load({
       refreshQuotaBtn: 'Refresh Quota',
       modelsHeading: 'Discovered Models',
       defaultModelBadge: 'Default',
+      selectedSubagentBadge: 'Active Subagent',
+      useAsSubagentModelBtn: 'Use for Subagent',
+      subagentTitle: 'Subagent Configuration (Tool & Model)',
+      subagentActiveModelTagPrefix: 'Model: ',
+      subagentFollowCliDefault: 'CLI Default',
+      subagentToolInfoPrefix: 'The active DSH model invokes Antigravity via tool ',
+      subagentToolInfoMid: ' and skill ',
+      subagentToolInfoSuffix: ' (direct main LLM provider removed to avoid Google ToS risk-control issues).',
+      subagentPresetModelLabel: 'Select Discovered Model',
+      subagentModelAutoOption: '(Use ACP CLI default / custom below)',
+      subagentDefaultModelLabel: 'Subagent Target Model ID (defaultModel)',
+      subagentDefaultModelPlaceholder: 'Leave blank for CLI default, or e.g. gemini-2.5-pro / gemini-3-pro',
+      subagentDefaultThoughtLabel: 'Thinking Level (defaultThoughtLevel)',
+      subagentDefaultThoughtPlaceholder: 'Leave blank for model default, or low / medium / high',
+      subagentPermissionModeLabel: 'Tool Permission Policy (permissionMode)',
+      subagentPermissionModeOptions: {
+        default: 'default (ask; applies fallback below when non-interactive)',
+        auto_edit: 'auto_edit (auto-approve workspace edits, recommended)',
+        auto: 'auto (auto-decide routine tool calls)',
+        yolo: 'yolo (auto-approve everything)',
+      },
+      subagentPermissionFallbackLabel: 'Fallback in default Mode',
+      subagentPermissionFallbackOptions: {
+        reject: 'reject (deny tool call and let subagent adapt)',
+        cancel: 'cancel (cancel subagent turn immediately)',
+      },
+      subagentSystemPromptLabel: 'Appended System Instructions (Optional)',
+      subagentSystemPromptPlaceholder: 'e.g. Keep edits tightly scoped and summarize modified file paths.',
+      saveSubagentBtn: 'Save Subagent Config',
+      clearSubagentModelBtn: 'Reset Model',
+      subagentSavedNotice: 'Subagent configuration saved and applied immediately for future tool calls.',
       noModelsHint: 'No models loaded yet. Install CLI, sign in, and click "Refresh Models".',
       quotaHeading: 'Quota Windows',
       quotaExhaustedBadge: 'Quota Exhausted',
@@ -759,10 +856,17 @@ window.__ModuleLoader__.load({
       const [apiKey, setApiKey] = React.useState('');
       const [authCode, setAuthCode] = React.useState('');
 
+      const [subagentModel, setSubagentModel] = React.useState('');
+      const [subagentThoughtLevel, setSubagentThoughtLevel] = React.useState('');
+      const [subagentPermissionMode, setSubagentPermissionMode] = React.useState('default');
+      const [subagentPermissionFallback, setSubagentPermissionFallback] = React.useState('reject');
+      const [subagentSystemPromptAppend, setSubagentSystemPromptAppend] = React.useState('');
+
       const mountedRef = React.useRef(true);
       const initializedRef = React.useRef(false);
       const runtimeDirtyRef = React.useRef(false);
       const authDirtyRef = React.useRef(false);
+      const subagentDirtyRef = React.useRef(false);
       const pluginUpdateTrackRef = React.useRef({
         wasUpdating: false,
         version: '',
@@ -809,6 +913,42 @@ window.__ModuleLoader__.load({
             setGcpProject(typeof cfg.gcpProject === 'string' ? cfg.gcpProject : '');
             setGcpLocation(typeof cfg.gcpLocation === 'string' ? cfg.gcpLocation : '');
           }
+          const subCfg = nextStatus.subagent;
+          if (subCfg && typeof subCfg === 'object' && (isInitial || !subagentDirtyRef.current)) {
+            setSubagentModel(typeof subCfg.defaultModel === 'string' ? subCfg.defaultModel : '');
+            setSubagentThoughtLevel(
+              typeof subCfg.defaultThoughtLevel === 'string' ? subCfg.defaultThoughtLevel : '',
+            );
+            setSubagentPermissionMode(
+              typeof subCfg.permissionMode === 'string' ? subCfg.permissionMode : 'default',
+            );
+            setSubagentPermissionFallback(
+              typeof subCfg.permissionFallback === 'string' ? subCfg.permissionFallback : 'reject',
+            );
+            setSubagentSystemPromptAppend(
+              typeof subCfg.systemPromptAppend === 'string' ? subCfg.systemPromptAppend : '',
+            );
+          }
+          initializedRef.current = true;
+        } else if (
+          nextStatus.subagent &&
+          typeof nextStatus.subagent === 'object' &&
+          (!initializedRef.current || !subagentDirtyRef.current)
+        ) {
+          const subCfg = nextStatus.subagent;
+          setSubagentModel(typeof subCfg.defaultModel === 'string' ? subCfg.defaultModel : '');
+          setSubagentThoughtLevel(
+            typeof subCfg.defaultThoughtLevel === 'string' ? subCfg.defaultThoughtLevel : '',
+          );
+          setSubagentPermissionMode(
+            typeof subCfg.permissionMode === 'string' ? subCfg.permissionMode : 'default',
+          );
+          setSubagentPermissionFallback(
+            typeof subCfg.permissionFallback === 'string' ? subCfg.permissionFallback : 'reject',
+          );
+          setSubagentSystemPromptAppend(
+            typeof subCfg.systemPromptAppend === 'string' ? subCfg.systemPromptAppend : '',
+          );
           initializedRef.current = true;
         }
       }, []);
@@ -985,6 +1125,22 @@ window.__ModuleLoader__.load({
         );
       };
 
+      const handleSaveSubagentConfig = (overridePatch) => {
+        const payload = overridePatch || {
+          defaultModel: subagentModel.trim(),
+          defaultThoughtLevel: subagentThoughtLevel.trim(),
+          permissionMode: subagentPermissionMode,
+          permissionFallback: subagentPermissionFallback,
+          systemPromptAppend: subagentSystemPromptAppend.trim(),
+        };
+        return invokeAction('saveSubagent', 'saveSubagentConfig', payload, {
+          notice: copy.subagentSavedNotice,
+          onSuccess: () => {
+            subagentDirtyRef.current = false;
+          },
+        });
+      };
+
       const handleSaveGcpConfig = () => {
         return invokeAction(
           'saveGcp',
@@ -1113,6 +1269,19 @@ window.__ModuleLoader__.load({
       const authState = status && status.auth ? status.auth : null;
       const models = status && Array.isArray(status.models) ? status.models : [];
       const quota = status && status.quota ? status.quota : null;
+      const subagentSnap = status && status.subagent ? status.subagent : null;
+      const activeSubagentToolName =
+        subagentSnap && typeof subagentSnap.toolName === 'string' && subagentSnap.toolName
+          ? subagentSnap.toolName
+          : 'antigravity_agent';
+      const activeSavedSubagentModel =
+        subagentSnap && typeof subagentSnap.defaultModel === 'string'
+          ? subagentSnap.defaultModel
+          : subagentModel.trim();
+      const matchedSubagentModel =
+        models.find((m) => m && m.id === subagentModel.trim()) || null;
+      const selectSubagentModelValue =
+        models.some((m) => m && m.id === subagentModel.trim()) ? subagentModel.trim() : '';
       const hasCustomBinaryPath = Boolean(cfg && cfg.binaryPath);
       const hasApiKey = Boolean(
         (profile && profile.hasApiKey) || (cfg && cfg.hasApiKey),
@@ -2043,7 +2212,218 @@ window.__ModuleLoader__.load({
             : null,
         ),
 
-        // Card 3: Models & Quota
+        // Card 3: Subagent Configuration (Model & Tool)
+        h(
+          'section',
+          { className: 'agp-card', 'data-acp-card': 'subagent' },
+          h(
+            'div',
+            { className: 'agp-card-head' },
+            h('h3', { className: 'agp-card-title' }, copy.subagentTitle),
+            h(
+              'span',
+              {
+                className: activeSavedSubagentModel ? 'agp-badge agp-badge-ok' : 'agp-badge',
+                'data-acp-subagent-model-badge': 'true',
+              },
+              `${copy.subagentActiveModelTagPrefix}${
+                activeSavedSubagentModel || copy.subagentFollowCliDefault
+              }`,
+            ),
+          ),
+          h(
+            'p',
+            { className: 'agp-muted' },
+            copy.subagentToolInfoPrefix,
+            h('code', { className: 'agp-mono' }, activeSubagentToolName),
+            copy.subagentToolInfoMid,
+            h('code', { className: 'agp-mono' }, 'antigravity-subagent'),
+            copy.subagentToolInfoSuffix,
+          ),
+          h(
+            'div',
+            { className: 'agp-fields-grid' },
+            models.length > 0
+              ? h(
+                  'label',
+                  { className: 'agp-field' },
+                  h('span', { className: 'agp-label' }, copy.subagentPresetModelLabel),
+                  h(
+                    'select',
+                    {
+                      className: 'agp-select',
+                      'data-acp-select': 'subagent-model',
+                      value: selectSubagentModelValue,
+                      onChange: (event) => {
+                        subagentDirtyRef.current = true;
+                        setSubagentModel(event.target.value);
+                      },
+                    },
+                    h('option', { value: '' }, copy.subagentModelAutoOption),
+                    ...models.map((m) =>
+                      h(
+                        'option',
+                        { key: m.id, value: m.id },
+                        `${m.name && m.name !== m.id ? `${m.name} (${m.id})` : m.id}${
+                          m.isDefault ? ` [${copy.defaultModelBadge}]` : ''
+                        }`,
+                      ),
+                    ),
+                  ),
+                )
+              : null,
+            h(
+              'label',
+              { className: 'agp-field' },
+              h('span', { className: 'agp-label' }, copy.subagentDefaultModelLabel),
+              h('input', {
+                type: 'text',
+                className: 'agp-input agp-mono',
+                'data-acp-input': 'subagent-model',
+                value: subagentModel,
+                placeholder: copy.subagentDefaultModelPlaceholder,
+                onChange: (event) => {
+                  subagentDirtyRef.current = true;
+                  setSubagentModel(event.target.value);
+                },
+              }),
+            ),
+            h(
+              'label',
+              { className: 'agp-field' },
+              h('span', { className: 'agp-label' }, copy.subagentDefaultThoughtLabel),
+              h('input', {
+                type: 'text',
+                className: 'agp-input agp-mono',
+                'data-acp-input': 'subagent-thought',
+                value: subagentThoughtLevel,
+                placeholder: copy.subagentDefaultThoughtPlaceholder,
+                onChange: (event) => {
+                  subagentDirtyRef.current = true;
+                  setSubagentThoughtLevel(event.target.value);
+                },
+              }),
+            ),
+          ),
+          matchedSubagentModel &&
+            Array.isArray(matchedSubagentModel.thinkingOptions) &&
+            matchedSubagentModel.thinkingOptions.length > 0
+            ? h(
+                'div',
+                { className: 'agp-row' },
+                ...matchedSubagentModel.thinkingOptions.map((opt) =>
+                  h(
+                    'button',
+                    {
+                      key: opt.id,
+                      type: 'button',
+                      className: 'agp-chip agp-chip-btn',
+                      'data-acp-subagent-thought-chip': opt.id,
+                      'data-default': subagentThoughtLevel === opt.id ? 'true' : 'false',
+                      onClick: () => {
+                        subagentDirtyRef.current = true;
+                        setSubagentThoughtLevel(opt.id);
+                      },
+                    },
+                    opt.name || opt.id,
+                  ),
+                ),
+              )
+            : null,
+          h(
+            'div',
+            { className: 'agp-fields-grid' },
+            h(
+              'label',
+              { className: 'agp-field' },
+              h('span', { className: 'agp-label' }, copy.subagentPermissionModeLabel),
+              h(
+                'select',
+                {
+                  className: 'agp-select',
+                  'data-acp-select': 'subagent-permission-mode',
+                  value: subagentPermissionMode,
+                  onChange: (event) => {
+                    subagentDirtyRef.current = true;
+                    setSubagentPermissionMode(event.target.value);
+                  },
+                },
+                h('option', { value: 'default' }, copy.subagentPermissionModeOptions.default),
+                h('option', { value: 'auto_edit' }, copy.subagentPermissionModeOptions.auto_edit),
+                h('option', { value: 'auto' }, copy.subagentPermissionModeOptions.auto),
+                h('option', { value: 'yolo' }, copy.subagentPermissionModeOptions.yolo),
+              ),
+            ),
+            h(
+              'label',
+              { className: 'agp-field' },
+              h('span', { className: 'agp-label' }, copy.subagentPermissionFallbackLabel),
+              h(
+                'select',
+                {
+                  className: 'agp-select',
+                  'data-acp-select': 'subagent-permission-fallback',
+                  value: subagentPermissionFallback,
+                  onChange: (event) => {
+                    subagentDirtyRef.current = true;
+                    setSubagentPermissionFallback(event.target.value);
+                  },
+                },
+                h('option', { value: 'reject' }, copy.subagentPermissionFallbackOptions.reject),
+                h('option', { value: 'cancel' }, copy.subagentPermissionFallbackOptions.cancel),
+              ),
+            ),
+          ),
+          h(
+            'label',
+            { className: 'agp-field' },
+            h('span', { className: 'agp-label' }, copy.subagentSystemPromptLabel),
+            h('textarea', {
+              className: 'agp-textarea',
+              'data-acp-input': 'subagent-system-prompt',
+              value: subagentSystemPromptAppend,
+              placeholder: copy.subagentSystemPromptPlaceholder,
+              onChange: (event) => {
+                subagentDirtyRef.current = true;
+                setSubagentSystemPromptAppend(event.target.value);
+              },
+            }),
+          ),
+          h(
+            'div',
+            { className: 'agp-row', style: { justifyContent: 'space-between' } },
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'agp-btn',
+                'data-acp-action': 'reset-subagent-model',
+                disabled: isBusy || (!subagentModel.trim() && !subagentThoughtLevel.trim()),
+                onClick: () => {
+                  subagentDirtyRef.current = true;
+                  setSubagentModel('');
+                  setSubagentThoughtLevel('');
+                },
+              },
+              copy.clearSubagentModelBtn,
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'agp-btn agp-btn-primary',
+                'data-acp-action': 'save-subagent',
+                disabled: isBusy,
+                onClick: () => {
+                  handleSaveSubagentConfig();
+                },
+              },
+              copy.saveSubagentBtn,
+            ),
+          ),
+        ),
+
+        // Card 4: Models & Quota
         h(
           'section',
           { className: 'agp-card', 'data-acp-card': 'models-quota' },
@@ -2113,9 +2493,37 @@ window.__ModuleLoader__.load({
                         h('strong', null, model.name || model.id),
                         h('span', { className: 'agp-muted agp-mono' }, model.id),
                       ),
-                      model.isDefault
-                        ? h('span', { className: 'agp-badge agp-badge-ok' }, copy.defaultModelBadge)
-                        : null,
+                      h(
+                        'div',
+                        { className: 'agp-row' },
+                        model.isDefault
+                          ? h('span', { className: 'agp-badge agp-badge-ok' }, copy.defaultModelBadge)
+                          : null,
+                        activeSavedSubagentModel === model.id
+                          ? h(
+                              'span',
+                              {
+                                className: 'agp-badge agp-badge-ok',
+                                'data-acp-selected-subagent': model.id,
+                              },
+                              copy.selectedSubagentBadge,
+                            )
+                          : h(
+                              'button',
+                              {
+                                type: 'button',
+                                className: 'agp-btn',
+                                'data-acp-action': `use-subagent-model-${model.id}`,
+                                disabled: isBusy,
+                                onClick: () => {
+                                  subagentDirtyRef.current = false;
+                                  setSubagentModel(model.id);
+                                  handleSaveSubagentConfig({ defaultModel: model.id });
+                                },
+                              },
+                              copy.useAsSubagentModelBtn,
+                            ),
+                      ),
                     ),
                     model.description
                       ? h('p', { className: 'agp-muted' }, model.description)

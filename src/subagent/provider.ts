@@ -39,6 +39,7 @@ import {
   isSignInRequiredError,
   selectPermissionOption,
 } from '../acp/protocol.js';
+import { consumePendingCallOverrides } from './overrides.js';
 
 /** Minimal logger surface accepted by {@link AntigravitySubagentProvider}. */
 export interface SubagentProviderLogger {
@@ -219,21 +220,29 @@ export class AntigravitySubagentProvider implements SubagentProvider {
   readonly name: string;
   readonly capabilities: SubagentCapabilities = NO_START_CAPABILITIES;
   readonly inheritsParentContext = false;
+  private readonly resolveConfig: () => SubagentPluginConfig;
 
   constructor(
     private readonly runtime: AntigravityRuntimeService,
-    private readonly config: SubagentPluginConfig,
+    configOrResolver: SubagentPluginConfig | (() => SubagentPluginConfig),
     private readonly attachments?: AttachmentStore,
     private readonly logger?: SubagentProviderLogger,
   ) {
-    this.name = config.providerName?.trim() || 'antigravity';
-    assertPositiveFinite(DIAGNOSTIC_PREFIX, 'disposeEofGraceMs', config.disposeEofGraceMs);
-    assertPositiveFinite(DIAGNOSTIC_PREFIX, 'disposeGraceMs', config.disposeGraceMs);
+    this.resolveConfig =
+      typeof configOrResolver === 'function' ? configOrResolver : () => configOrResolver;
+    const initial = this.resolveConfig();
+    this.name = initial.providerName?.trim() || 'antigravity';
+    assertPositiveFinite(DIAGNOSTIC_PREFIX, 'disposeEofGraceMs', initial.disposeEofGraceMs);
+    assertPositiveFinite(DIAGNOSTIC_PREFIX, 'disposeGraceMs', initial.disposeGraceMs);
   }
 
   async start(request: ResolvedSubagentStartRequest): Promise<SubagentRun> {
     request.signal.throwIfAborted();
     assertUsableCwd(DIAGNOSTIC_PREFIX, 'child cwd', request.cwd);
+    const activeConfig = this.resolveConfig();
+    const callOverrides = consumePendingCallOverrides(request.prompt);
+    const targetModel = callOverrides?.model ?? activeConfig.defaultModel;
+    const targetThoughtLevel = callOverrides?.thoughtLevel ?? activeConfig.defaultThoughtLevel;
 
     if (request.agentOptions !== undefined) {
       throw new SubagentError(
@@ -274,11 +283,11 @@ export class AntigravitySubagentProvider implements SubagentProvider {
 
       const meta = antigravitySessionMeta(
         client.initialized.capabilities,
-        this.config.systemPromptAppend,
+        activeConfig.systemPromptAppend,
       );
       const systemFallback =
-        meta === undefined && this.config.systemPromptAppend?.trim()
-          ? this.config.systemPromptAppend.trim()
+        meta === undefined && activeConfig.systemPromptAppend?.trim()
+          ? activeConfig.systemPromptAppend.trim()
           : undefined;
 
       promptBlocks = await convertSubagentPromptBlocks(
@@ -298,20 +307,20 @@ export class AntigravitySubagentProvider implements SubagentProvider {
         request.signal,
       );
 
-      if (this.config.defaultModel !== undefined && client.setSessionModel) {
-        await client.setSessionModel(session.sessionId, this.config.defaultModel, request.signal);
+      if (targetModel !== undefined && client.setSessionModel) {
+        await client.setSessionModel(session.sessionId, targetModel, request.signal);
       }
 
-      if (this.config.defaultThoughtLevel !== undefined && client.setSessionThoughtLevel) {
+      if (targetThoughtLevel !== undefined && client.setSessionThoughtLevel) {
         await client.setSessionThoughtLevel(
           session.sessionId,
-          this.config.defaultThoughtLevel,
+          targetThoughtLevel,
           request.signal,
         );
       }
 
       const targetMode = antigravitySessionMode(
-        this.config.permissionMode,
+        activeConfig.permissionMode,
         session.modes?.availableModes,
       );
       if (targetMode && session.modes?.currentModeId !== targetMode) {
@@ -326,7 +335,7 @@ export class AntigravitySubagentProvider implements SubagentProvider {
       request.signal.throwIfAborted();
     } catch (error: unknown) {
       if (client !== undefined) {
-        await client.close(this.config.disposeGraceMs).catch(() => {});
+        await client.close(activeConfig.disposeGraceMs).catch(() => {});
       }
       throw error;
     }
@@ -370,8 +379,8 @@ export class AntigravitySubagentProvider implements SubagentProvider {
         onRequestPermission: (permReq) =>
           resolveSubagentPermission(
             permReq,
-            this.config.permissionMode,
-            this.config.permissionFallback,
+            activeConfig.permissionMode,
+            activeConfig.permissionFallback,
           ),
       },
       turnAbortController.signal,
@@ -394,10 +403,10 @@ export class AntigravitySubagentProvider implements SubagentProvider {
           requestCancel();
           await waitForDelayOrSettle(
             Promise.race([promptSettled, activeClient.closed.catch(() => {})]),
-            this.config.disposeEofGraceMs,
+            activeConfig.disposeEofGraceMs,
           );
         }
-        await activeClient.close(this.config.disposeGraceMs).catch(() => {});
+        await activeClient.close(activeConfig.disposeGraceMs).catch(() => {});
       })();
       return teardownPromise;
     };
@@ -412,7 +421,7 @@ export class AntigravitySubagentProvider implements SubagentProvider {
           async (): Promise<AcpPromptResult | 'local-cancelled'> => {
             await waitForDelayOrSettle(
               promptSettled,
-              Math.min(LOCAL_CANCEL_GRACE_MS, this.config.disposeEofGraceMs),
+              Math.min(LOCAL_CANCEL_GRACE_MS, activeConfig.disposeEofGraceMs),
             );
             return 'local-cancelled';
           },

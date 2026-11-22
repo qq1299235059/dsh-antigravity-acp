@@ -5,29 +5,23 @@ import { fileURLToPath } from 'node:url';
 import { Context, Service, type Fiber } from '@deepseek-ai/cordis';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import { brandString } from '@deepseek-ai/dsh-brand';
-import {
-  BlockAssembler,
-  LlmError,
-  LlmRuntime,
-  createToolResultMessage,
-  createUserMessage,
-  type StreamChunk,
-  type ToolSchema,
-} from '@deepseek-ai/dsh-llm';
+import { LlmError } from '@deepseek-ai/dsh-llm';
 import type { SessionId } from '@deepseek-ai/dsh-session';
-import type { SubagentProvider } from '@deepseek-ai/dsh-subagent';
+import type { SubagentActivation, SubagentActivationSpec, SubagentProvider } from '@deepseek-ai/dsh-subagent';
 import type { SubprocessHandle, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess';
 import { LocalSubprocessRuntime } from '@deepseek-ai/dsh-subprocess-local';
+import { SystemPrompt } from '@deepseek-ai/dsh-system-prompt';
+import { ToolsService, type ToolExecution } from '@deepseek-ai/dsh-tools';
 import { afterEach, describe, expect, it } from 'vitest';
 import { runCli } from '../../src/cli.js';
 import * as runtimePlugin from '../../src/index.js';
-import * as llmPlugin from '../../src/llm-plugin.js';
 import * as subagentPlugin from '../../src/subagent-plugin.js';
 
 const FAKE_SERVER_PATH = fileURLToPath(new URL('../acp/fake-agy-server.mjs', import.meta.url));
 
 class TestSubagentRegistry extends Service {
   private readonly providers = new Map<string, SubagentProvider>();
+  readonly startCalls: Record<string, unknown>[] = [];
 
   constructor(ctx: Context) {
     super(ctx, 'subagents');
@@ -55,24 +49,88 @@ class TestSubagentRegistry extends Service {
   resolveMaxDepth(configured?: number | 'provider-managed'): number | undefined {
     return configured === 'provider-managed' ? undefined : (configured ?? 1);
   }
+
+  async startActivation(spec: SubagentActivationSpec): Promise<SubagentActivation> {
+    const rawSpec = spec as unknown as Record<string, unknown>;
+    this.startCalls.push(rawSpec);
+    const provider = this.providers.get(spec.provider);
+    if (!provider || !provider.start) {
+      throw new Error(`Missing subagent provider: ${spec.provider}`);
+    }
+    const maybeNested = rawSpec['request'] as Record<string, unknown> | undefined;
+    const cwd = (maybeNested?.['cwd'] ?? spec.cwd) as string | undefined;
+    const prompt = (maybeNested?.['prompt'] ?? spec.prompt) as SubagentActivationSpec['prompt'];
+    const parent = (maybeNested?.['parent'] ?? spec.parent) as Agent;
+    const run = await provider.start({
+      cwd: cwd ?? process.cwd(),
+      prompt,
+      parent,
+      label: spec.label,
+      signal: spec.signal,
+    });
+    return {
+      childId: run.id,
+      name: spec.name ?? run.id,
+      result: run.result,
+      dispose: () => run.dispose(),
+    };
+  }
+}
+
+class TestSkillRegistry extends Service {
+  readonly providerFactories: Array<(control: { signal: AbortSignal; invalidate(): void }) => {
+    readonly name: string;
+    list(): Promise<readonly Record<string, unknown>[]>;
+    get(candidate: unknown): Promise<Record<string, unknown> | undefined>;
+  }> = [];
+  invalidations = 0;
+
+  constructor(ctx: Context) {
+    super(ctx, 'skills');
+  }
+
+  registerProvider(
+    create: (control: { signal: AbortSignal; invalidate(): void }) => {
+      readonly name: string;
+      list(): Promise<readonly Record<string, unknown>[]>;
+      get(candidate: unknown): Promise<Record<string, unknown> | undefined>;
+    },
+  ): () => void {
+    const controller = new AbortController();
+    const provider = create({
+      signal: controller.signal,
+      invalidate: () => {
+        this.invalidations += 1;
+      },
+    });
+    return this.ctx.effect(() => {
+      const factory = () => provider;
+      this.providerFactories.push(factory);
+      return () => {
+        controller.abort();
+        const idx = this.providerFactories.indexOf(factory);
+        if (idx >= 0) {
+          this.providerFactories.splice(idx, 1);
+        }
+      };
+    }, `testSkills.registerProvider(${provider.name})`);
+  }
 }
 
 function createTestSubprocessClass(
   fakeBinaryPath: string,
-  subagentCwd: string,
+  extraEnv?: Readonly<Record<string, string>>,
 ): typeof LocalSubprocessRuntime {
-  return class DualBundleSubprocessRuntime extends LocalSubprocessRuntime {
+  return class SubagentIntegrationSubprocess extends LocalSubprocessRuntime {
     override spawn(spec: SubprocessSpawnSpec): SubprocessHandle {
       if (spec.argv[0] === fakeBinaryPath) {
-        const isSubagent = path.resolve(spec.cwd) === path.resolve(subagentCwd);
         return super.spawn({
           ...spec,
           argv: [process.execPath, FAKE_SERVER_PATH, ...spec.argv.slice(1)],
           env: {
             ...spec.env,
-            ...(isSubagent
-              ? { FAKE_AGY_REPLY_TEXT: 'Subagent task completed independently' }
-              : { FAKE_AGY_MCP_TOOL_CALL: '1', FAKE_AGY_MCP_TOOL_NAME: 'calc' }),
+            FAKE_AGY_REPLY_TEXT: 'Subagent task completed independently',
+            ...extraEnv,
           },
         });
       }
@@ -81,20 +139,7 @@ function createTestSubprocessClass(
   };
 }
 
-async function collectStream(stream: AsyncIterable<StreamChunk>): Promise<{
-  chunks: StreamChunk[];
-  assembler: BlockAssembler;
-}> {
-  const chunks: StreamChunk[] = [];
-  const assembler = new BlockAssembler();
-  for await (const chunk of stream) {
-    chunks.push(chunk);
-    assembler.push(chunk);
-  }
-  return { chunks, assembler };
-}
-
-describe('dual-bundle Cordis 4.1.0 integration', () => {
+describe('subagent bundle Cordis 4.1.0 integration', () => {
   const tempDirs: string[] = [];
   const scopeFibers: Fiber[] = [];
 
@@ -109,34 +154,27 @@ describe('dual-bundle Cordis 4.1.0 integration', () => {
     }
   });
 
-  it('enforces Cordis 4.1.0 named-export & array-inject metadata across all 3 plugin rows', () => {
+  it('enforces Cordis 4.1.0 named-export & array-inject metadata for runtime and subagent plugins', () => {
     expect('default' in runtimePlugin).toBe(false);
-    expect('default' in llmPlugin).toBe(false);
     expect('default' in subagentPlugin).toBe(false);
 
     expect(runtimePlugin.name).toBe('antigravity-runtime');
     expect(runtimePlugin.inject).toEqual(['subprocess']);
     expect(typeof runtimePlugin.apply).toBe('function');
 
-    expect(llmPlugin.name).toBe('llm-antigravity-acp');
-    expect(llmPlugin.inject).toEqual(['llm', 'antigravityRuntime']);
-    expect(typeof llmPlugin.apply).toBe('function');
-
     expect(subagentPlugin.name).toBe('subagent-antigravity-acp');
     expect(subagentPlugin.inject).toEqual(['subagents', 'antigravityRuntime']);
     expect(typeof subagentPlugin.apply).toBe('function');
   });
 
-  it('mounts all 3 plugins in Cordis, runs LLM tool roundtrip and Subagent concurrently, and disposes cleanly', async () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-dual-bundle-'));
+  it('registers provider, antigravity_agent tool, skill, and systemPrompt; picks up live subagent model overrides; and disposes cleanly', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-subagent-bundle-'));
     tempDirs.push(tempDir);
 
     const binDir = path.join(tempDir, 'bin');
     const profileDir = path.join(tempDir, 'profile');
-    const llmWorkDir = path.join(tempDir, 'llm-cwd');
     const subagentWorkDir = path.join(tempDir, 'subagent-cwd');
     fs.mkdirSync(binDir, { recursive: true });
-    fs.mkdirSync(llmWorkDir, { recursive: true });
     fs.mkdirSync(subagentWorkDir, { recursive: true });
 
     const fakeBinaryPath = path.join(
@@ -158,19 +196,17 @@ describe('dual-bundle Cordis 4.1.0 integration', () => {
     }
 
     const ctx = new Context();
-    const modelsUpdatedProviders: string[] = [];
     let runtimeFiber!: Fiber;
-    let llmPluginFiber!: Fiber;
     let subagentPluginFiber!: Fiber;
 
     const bundleScope = await ctx.plugin(async (scopeCtx) => {
-      scopeCtx.on('llm/models-updated', (provider) => {
-        modelsUpdatedProviders.push(provider);
-      });
-
-      await scopeCtx.plugin(createTestSubprocessClass(fakeBinaryPath, subagentWorkDir));
-      await scopeCtx.plugin(LlmRuntime);
+      await scopeCtx.plugin(
+        createTestSubprocessClass(fakeBinaryPath, { FAKE_AGY_ECHO_CONTEXT: '1' }),
+      );
       await scopeCtx.plugin(TestSubagentRegistry);
+      await scopeCtx.plugin(ToolsService);
+      await scopeCtx.plugin(SystemPrompt);
+      await scopeCtx.plugin(TestSkillRegistry);
 
       runtimeFiber = await scopeCtx.plugin(runtimePlugin, {
         binaryPath: fakeBinaryPath,
@@ -183,121 +219,119 @@ describe('dual-bundle Cordis 4.1.0 integration', () => {
         queueTimeoutMs: 10_000,
       });
 
-      llmPluginFiber = await scopeCtx.plugin(llmPlugin, {
-        providerId: 'antigravity-acp',
-        providerName: 'Antigravity ACP Test',
-        bridgeParkSettleMs: 15,
-      });
-
       subagentPluginFiber = await scopeCtx.plugin(subagentPlugin, {
         providerName: 'antigravity',
         permissionMode: 'yolo',
+        defaultModel: 'gemini-2.5-pro',
       });
     });
     scopeFibers.push(bundleScope);
 
-    expect(runtimeFiber.state).toBe(2 /* FiberState.ACTIVE */);
-    expect(llmPluginFiber.state).toBe(2 /* FiberState.ACTIVE */);
-    expect(subagentPluginFiber.state).toBe(2 /* FiberState.ACTIVE */);
-
-    const providerInfo = ctx.llm.listProviders();
-    expect(providerInfo).toEqual([
-      { id: 'antigravity-acp', name: 'Antigravity ACP Test' },
-    ]);
-
-    const subagentsService = ctx.get('subagents') as unknown as TestSubagentRegistry;
-    const subagentProvider = subagentsService.getProvider('antigravity');
-    expect(subagentProvider).toBeDefined();
-    expect(subagentsService.resolveMaxDepth('provider-managed')).toBeUndefined();
-
-    const tools: ToolSchema[] = [
-      {
-        name: 'calc',
-        description: 'Evaluate arithmetic expression',
-        parameters: {
-          type: 'object',
-          properties: { expr: { type: 'string' } },
-          required: ['expr'],
-        },
-      },
-    ];
-    const llmSessionId = brandString<SessionId>('dual-bundle-llm-session');
-    const userMsg = createUserMessage({
-      content: [{ type: 'text', text: 'Compute 6*7 with calc' }],
-      source: { kind: 'user' },
+    ctx.tools.setExecutor({
+      describe: (tools) => ({
+        schemas: tools.map((t) => ({
+          name: t.name,
+          description: t.description,
+          parameters: t.parameters,
+        })),
+        knownNames: tools.map((t) => t.name),
+      }),
+      execute: async () => ({
+        results: [],
+        additionalContexts: [],
+        concluded: false,
+      }),
     });
 
-    const runLlmRoundtrip = async (): Promise<string> => {
-      const seg1 = await collectStream(
-        ctx.llm.stream({
-          provider: 'antigravity-acp',
-          model: 'gemini-2.5-pro',
-          sessionId: llmSessionId,
-          tools,
-          messages: [userMsg],
-        }),
-      );
-      expect(seg1.assembler.finish).toEqual({ kind: 'tool-calls' });
-      const toolCalls = seg1.assembler
-        .blocks()
-        .filter((b) => b.type === 'tool-call');
-      expect(toolCalls).toHaveLength(1);
-      expect(toolCalls[0].name).toBe('calc');
+    expect(runtimeFiber.state).toBe(2 /* FiberState.ACTIVE */);
+    expect(subagentPluginFiber.state).toBe(2 /* FiberState.ACTIVE */);
 
-      const assistantMsg = seg1.assembler.message({
-        provider: 'antigravity-acp',
-        model: 'gemini-2.5-pro',
-      });
-      const toolResultMsg = createToolResultMessage({
-        callId: toolCalls[0].id,
-        content: [{ type: 'text', text: '42' }],
-        isError: false,
-      });
+    // No main LLM provider mounted
+    expect(ctx.get('llm')).toBeUndefined();
 
-      const seg2 = await collectStream(
-        ctx.llm.stream({
-          provider: 'antigravity-acp',
-          model: 'gemini-2.5-pro',
-          sessionId: llmSessionId,
-          tools,
-          messages: [userMsg, assistantMsg, toolResultMsg],
-        }),
-      );
-      expect(seg2.assembler.finish).toEqual({ kind: 'stop' });
-      return seg2.assembler
-        .blocks()
-        .filter((b) => b.type === 'text')
-        .map((b) => b.text)
-        .join('');
+    // Verify tool registration on ctx.tools
+    const toolDef = ctx.tools.get('antigravity_agent');
+    expect(toolDef).toBeDefined();
+    expect(toolDef?.name).toBe('antigravity_agent');
+
+    // Verify systemPrompt section registration
+    const assembled = await ctx.systemPrompt.assemble();
+    expect(
+      assembled.sections.some(
+        (s) => s.name === 'tool:antigravity_agent' && s.text.includes('antigravity_agent'),
+      ),
+    ).toBe(true);
+
+    // Verify skill provider registration & live dynamic content
+    const skillRegistry = ctx.get('skills') as unknown as TestSkillRegistry;
+    expect(skillRegistry.providerFactories).toHaveLength(1);
+    const skillProvider = skillRegistry.providerFactories[0]({
+      signal: new AbortController().signal,
+      invalidate: () => {},
+    });
+    const candidates = await skillProvider.list();
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0].name).toBe('antigravity-subagent');
+    const skillDocBefore = await skillProvider.get(candidates[0]);
+    expect(skillDocBefore?.content).toContain('gemini-2.5-pro');
+
+    // Invoke tool directly with mock ToolRunContext
+    const parentAgent = {
+      id: brandString<SessionId>('parent-root'),
+    } as unknown as Agent;
+    const toolExec = {
+      agent: parentAgent,
+      signal: new AbortController().signal,
+      callId: brandString('call-1') as ToolExecution['callId'],
+      rootCallId: brandString('call-1') as ToolExecution['callId'],
+      name: 'antigravity_agent',
+      arguments: {},
+      token: Symbol('exec') as ToolExecution['token'],
+      deferContext: () => {},
+      concludeTurn: () => {},
     };
 
-    const runSubagentTask = async (): Promise<string> => {
-      const run = await subagentProvider!.start!({
+    const callResult = (await toolDef!.execute(
+      {
+        description: 'Run independent check',
+        prompt: 'Perform subagent work',
         cwd: subagentWorkDir,
-        prompt: [{ type: 'text', text: 'Independent subagent job' }],
-        parent: { id: brandString<SessionId>('parent-root') } as unknown as Agent,
-        signal: new AbortController().signal,
-      });
-      try {
-        const res = await run.result;
-        expect(res.stopReason).toBe('completed');
-        return res.output.map((b) => (b.type === 'text' ? b.text : '')).join('');
-      } finally {
-        await run.dispose();
-      }
-    };
+      },
+      toolExec,
+    )) as { subagentId: string; model?: string; stopReason: string; outputText: string };
 
-    const [llmText, subagentText] = await Promise.all([
-      runLlmRoundtrip(),
-      runSubagentTask(),
-    ]);
+    expect(callResult.model).toBe('gemini-2.5-pro');
+    expect(callResult.stopReason).toBe('completed');
+    expect(JSON.parse(callResult.outputText)).toMatchObject({
+      model: 'gemini-2.5-pro',
+    });
 
-    expect(llmText).toBe('Tool result: 42');
-    expect(subagentText).toBe('Subagent task completed independently');
+    // Live UI override update changes active model for next call and invalidates skill
+    ctx.antigravityRuntime.updateSubagentConfig?.({
+      defaultModel: 'gemini-2.5-flash',
+      defaultThoughtLevel: 'high',
+      permissionMode: 'auto',
+    });
+    expect(skillRegistry.invalidations).toBeGreaterThanOrEqual(1);
+    const skillDocAfter = await skillProvider.get(candidates[0]);
+    expect(skillDocAfter?.content).toContain('gemini-2.5-flash');
 
-    // Give initial background refreshModels a moment if still settling
-    await new Promise((r) => setTimeout(r, 50));
-    expect(modelsUpdatedProviders).toContain('antigravity-acp');
+    const callResult2 = (await toolDef!.execute(
+      {
+        description: 'Run with updated model',
+        prompt: 'Verify updated model selection',
+        cwd: subagentWorkDir,
+      },
+      toolExec,
+    )) as { model?: string; thoughtLevel?: string; outputText: string };
+
+    expect(callResult2.model).toBe('gemini-2.5-flash');
+    expect(callResult2.thoughtLevel).toBe('high');
+    expect(JSON.parse(callResult2.outputText)).toMatchObject({
+      model: 'gemini-2.5-flash',
+      thoughtLevel: 'high',
+      mode: 'auto',
+    });
 
     const runtimeService = ctx.antigravityRuntime;
     const statusBeforeStop = await runtimeService.getStatus();
@@ -305,7 +339,15 @@ describe('dual-bundle Cordis 4.1.0 integration', () => {
     expect(statusBeforeStop.executable?.source).toBe('configured');
     expect(statusBeforeStop.activeLeases).toBe(0);
 
-    // Clean disposal via Cordis fiber disposal tears down all 3 plugins and runtime pool.
+    // Unloading subagent plugin alone withdraws tool, skill, and provider while host services remain live.
+    await subagentPluginFiber.dispose();
+    expect(ctx.tools.get('antigravity_agent')).toBeUndefined();
+    expect(
+      (ctx.get('subagents') as unknown as TestSubagentRegistry).getProvider('antigravity'),
+    ).toBeUndefined();
+    expect(skillRegistry.providerFactories).toHaveLength(0);
+
+    // Clean disposal via Cordis fiber disposal tears down runtime pool and remaining host services.
     await bundleScope.dispose();
     scopeFibers.pop();
 
@@ -313,7 +355,7 @@ describe('dual-bundle Cordis 4.1.0 integration', () => {
     expect(statusAfterStop.activeLeases).toBe(0);
     expect(statusAfterStop.idleWorkers).toBe(0);
     expect(ctx.get('antigravityRuntime')).toBeUndefined();
-    expect(ctx.get('llm')).toBeUndefined();
+    expect(ctx.get('tools')).toBeUndefined();
     expect(ctx.get('subagents')).toBeUndefined();
   });
 

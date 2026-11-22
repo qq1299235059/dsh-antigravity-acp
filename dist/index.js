@@ -5,8 +5,8 @@ import { createAntigravityInstaller, } from './runtime/installer.js';
 import { prepareAntigravityProfile, resolveProfilePaths, resolveProfileSnapshot, validateAuthConfig, validateProxyUrl, } from './runtime/profile.js';
 import { probeAntigravityQuota } from './runtime/quota.js';
 import { registerAntigravityControlRemote, } from './remote/control-remote.js';
-import { loadUiOverrides, mergeRuntimeConfigWithOverrides, } from './remote/ui-store.js';
-import { RuntimeConfigSchema } from './shared/config.js';
+import { loadSubagentUiOverrides, loadUiOverrides, mergeRuntimeConfigWithOverrides, } from './remote/ui-store.js';
+import { RuntimeConfigSchema, } from './shared/config.js';
 import { AntigravityAcpError, redactSensitiveText } from './shared/errors.js';
 export const name = 'antigravity-runtime';
 export const inject = ['subprocess'];
@@ -94,6 +94,27 @@ export function createAntigravityRuntimeService(subprocess, config, options = {}
     let lastQuota;
     let inflightDiscovery;
     const changeListeners = new Set();
+    let currentSubagentOverrides = {
+        ...(options.initialSubagentOverrides ?? {}),
+    };
+    let subagentDefaults = {
+        providerName: 'antigravity',
+        toolName: 'antigravity_agent',
+        permissionMode: 'default',
+        permissionFallback: 'reject',
+    };
+    const subagentChangeListeners = new Set();
+    const notifySubagentChanged = () => {
+        for (const listener of [...subagentChangeListeners]) {
+            try {
+                listener();
+            }
+            catch (error) {
+                const msg = error instanceof Error ? redactSensitiveText(error.message) : String(error);
+                options.logger?.warn(`antigravity subagent change listener failed: ${msg}`);
+            }
+        }
+    };
     const notifyChanged = () => {
         for (const listener of [...changeListeners]) {
             try {
@@ -446,6 +467,26 @@ export function createAntigravityRuntimeService(subprocess, config, options = {}
                 changeListeners.delete(listener);
             };
         },
+        getSubagentConfig() {
+            return { ...currentSubagentOverrides };
+        },
+        updateSubagentConfig(overrides) {
+            currentSubagentOverrides = { ...overrides };
+            notifySubagentChanged();
+            return { ...currentSubagentOverrides };
+        },
+        setSubagentDefaults(defaults) {
+            subagentDefaults = { ...defaults };
+        },
+        getSubagentDefaults() {
+            return { ...subagentDefaults };
+        },
+        onSubagentChanged(listener) {
+            subagentChangeListeners.add(listener);
+            return () => {
+                subagentChangeListeners.delete(listener);
+            };
+        },
         async dispose() {
             if (disposed) {
                 return;
@@ -454,6 +495,7 @@ export function createAntigravityRuntimeService(subprocess, config, options = {}
             disposeController.abort();
             cachedModels = undefined;
             changeListeners.clear();
+            subagentChangeListeners.clear();
             await pool.dispose();
         },
     };
@@ -467,8 +509,12 @@ export function apply(ctx, config) {
     const logger = ctx.logger(name);
     const profileDir = resolveProfilePaths(config).profileDir;
     const uiOverrides = loadUiOverrides(profileDir);
+    const initialSubagentOverrides = loadSubagentUiOverrides(profileDir);
     const effectiveConfig = mergeRuntimeConfigWithOverrides(config, uiOverrides);
-    const service = createAntigravityRuntimeService(ctx.subprocess, effectiveConfig, { logger });
+    const service = createAntigravityRuntimeService(ctx.subprocess, effectiveConfig, {
+        logger,
+        initialSubagentOverrides,
+    });
     ctx.provide('antigravityRuntime', service);
     ctx.inject(['typert'], (typertCtx) => {
         registerAntigravityControlRemote(typertCtx, service, { logger });
@@ -490,10 +536,10 @@ export function apply(ctx, config) {
 }
 // Re-export shared taxonomy, config schemas, contracts, and core helpers via named exports.
 export { AntigravityAcpError, redactSensitiveText, toLlmError, } from './shared/errors.js';
-export { AuthMethodSchema, LlmPluginConfigSchema, PermissionFallbackSchema, PermissionModeSchema, RuntimeConfigSchema, SubagentPluginConfigSchema, } from './shared/config.js';
+export { AuthMethodSchema, PermissionFallbackSchema, PermissionModeSchema, RuntimeConfigSchema, SubagentPluginConfigSchema, } from './shared/config.js';
 export { DEFAULT_PLUGIN_BRANCH, DEFAULT_PLUGIN_GITHUB_API_BASE, DEFAULT_PLUGIN_PACKAGE_NAME, DEFAULT_PLUGIN_RAW_BASE, DEFAULT_PLUGIN_REPO_NAME, DEFAULT_PLUGIN_REPO_OWNER, applyPluginUpdate, checkPluginUpdate, extractInstalledCommitFromLockfile, inferDshProfileDir, parseGitHubRepoUrl, readInstalledPluginInfo, readInstalledPluginManifestSync, validatePluginUpdateSpec, } from './runtime/updater.js';
 export { ANTIGRAVITY_CONTROL_INVOCATIONS, ANTIGRAVITY_CONTROL_NAMESPACE, ANTIGRAVITY_CONTROL_PACKAGE, ANTIGRAVITY_CONTROL_SERVICE_KEY, AntigravityControlService, registerAntigravityControlRemote, sanitizeControlError, stripUndefinedJson, } from './remote/control-remote.js';
-export { UI_CONFIG_FILENAME, UI_SECRETS_FILENAME, loadUiOverrides, mergeRuntimeConfigWithOverrides, saveUiOverrides, } from './remote/ui-store.js';
+export { UI_CONFIG_FILENAME, UI_SECRETS_FILENAME, loadSubagentUiOverrides, loadUiOverrides, mergeRuntimeConfigWithOverrides, mergeSubagentConfigWithOverrides, saveSubagentUiOverrides, saveUiOverrides, } from './remote/ui-store.js';
 export { ANTIGRAVITY_CLI_MANIFEST_BASE, MINIMUM_AGY_VERSION, antigravityCliTarget, compareSemver, parseAntigravityCliRelease, tryParseSemver, } from './runtime/release.js';
 export { AntigravityInstaller, createAntigravityInstaller, } from './runtime/installer.js';
 export { ANTIGRAVITY_AUTH_BROWSER_MARKER, ANTIGRAVITY_AUTH_STDOUT_PREFIX, buildAcpSpawnArgs, buildAntigravityEnvironment, prepareAntigravityProfile, removedEnvironmentKeys, resolveDefaultProfileDir, resolveProfilePaths, resolveProfileSnapshot, validateAuthConfig, validateLoginResponse, validateProxyUrl, parseAntigravityAuthorizationUrl, } from './runtime/profile.js';

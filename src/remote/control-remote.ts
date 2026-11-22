@@ -17,7 +17,12 @@ import {
   type PluginManagerLike,
   type PluginUpdateCheckResult,
 } from '../runtime/updater.js';
-import type { AntigravityAuthMethod, RuntimeConfig } from '../shared/config.js';
+import type {
+  AntigravityAuthMethod,
+  AntigravityPermissionFallback,
+  AntigravityPermissionMode,
+  RuntimeConfig,
+} from '../shared/config.js';
 import type {
   AntigravityAuthStartInput,
   AntigravityAuthSubmitCodeInput,
@@ -30,12 +35,18 @@ import type {
   AntigravityPluginUpdateState,
   AntigravityRuntimeService,
   AntigravitySaveConfigInput,
+  AntigravitySaveSubagentConfigInput,
+  AntigravitySubagentSettingsSnapshot,
   DiscoveredModel,
   QuotaSnapshot,
   QuotaWindow,
 } from '../shared/contracts.js';
 import { AntigravityAcpError, redactSensitiveText } from '../shared/errors.js';
-import { saveUiOverrides } from './ui-store.js';
+import {
+  loadSubagentUiOverrides,
+  saveSubagentUiOverrides,
+  saveUiOverrides,
+} from './ui-store.js';
 
 export const ANTIGRAVITY_CONTROL_PACKAGE = 'dsh-antigravity-acp';
 export const ANTIGRAVITY_CONTROL_SERVICE_KEY = 'antigravityControl';
@@ -48,6 +59,18 @@ const VALID_AUTH_METHODS = new Set<AntigravityAuthMethod>([
   'oauth-business',
   'gemini-api-key',
   'agent-platform',
+]);
+
+const VALID_PERMISSION_MODES = new Set<AntigravityPermissionMode>([
+  'default',
+  'auto_edit',
+  'auto',
+  'yolo',
+]);
+
+const VALID_PERMISSION_FALLBACKS = new Set<AntigravityPermissionFallback>([
+  'reject',
+  'cancel',
 ]);
 
 const VALID_AUTH_MODES = new Set<'code' | 'loopback'>(['code', 'loopback']);
@@ -256,6 +279,48 @@ function parseSaveConfigInput(value: unknown): AntigravitySaveConfigInput {
   });
 }
 
+function parseSaveSubagentConfigInput(value: unknown): AntigravitySaveSubagentConfigInput {
+  if (!isPlainRecord(value)) {
+    throw badRequest('saveSubagentConfig input must be a plain object');
+  }
+
+  const defaultModel = assertOptionalString(value, 'defaultModel');
+  const defaultThoughtLevel = assertOptionalString(value, 'defaultThoughtLevel');
+  const systemPromptAppend = assertOptionalString(value, 'systemPromptAppend');
+
+  let permissionMode: AntigravityPermissionMode | undefined;
+  if (Object.hasOwn(value, 'permissionMode') && value['permissionMode'] !== undefined) {
+    const rawMode = value['permissionMode'];
+    if (
+      typeof rawMode !== 'string' ||
+      !VALID_PERMISSION_MODES.has(rawMode as AntigravityPermissionMode)
+    ) {
+      throw badRequest('permissionMode must be one of default, auto_edit, auto, yolo');
+    }
+    permissionMode = rawMode as AntigravityPermissionMode;
+  }
+
+  let permissionFallback: AntigravityPermissionFallback | undefined;
+  if (Object.hasOwn(value, 'permissionFallback') && value['permissionFallback'] !== undefined) {
+    const rawFallback = value['permissionFallback'];
+    if (
+      typeof rawFallback !== 'string' ||
+      !VALID_PERMISSION_FALLBACKS.has(rawFallback as AntigravityPermissionFallback)
+    ) {
+      throw badRequest('permissionFallback must be one of reject, cancel');
+    }
+    permissionFallback = rawFallback as AntigravityPermissionFallback;
+  }
+
+  return stripUndefinedJson<AntigravitySaveSubagentConfigInput>({
+    ...(defaultModel !== undefined ? { defaultModel } : {}),
+    ...(defaultThoughtLevel !== undefined ? { defaultThoughtLevel } : {}),
+    ...(permissionMode !== undefined ? { permissionMode } : {}),
+    ...(permissionFallback !== undefined ? { permissionFallback } : {}),
+    ...(systemPromptAppend !== undefined ? { systemPromptAppend } : {}),
+  });
+}
+
 function parseAuthStartInput(value: unknown): AntigravityAuthStartInput | undefined {
   if (value === undefined) {
     return undefined;
@@ -393,6 +458,13 @@ export const ANTIGRAVITY_CONTROL_INVOCATIONS: readonly InvocationDescriptor[] = 
   makeDirectDescriptor(
     'saveConfig',
     makeInputCodec('dsh-antigravity-acp#ControlSaveConfigInput', parseSaveConfigInput),
+  ),
+  makeDirectDescriptor(
+    'saveSubagentConfig',
+    makeInputCodec(
+      'dsh-antigravity-acp#ControlSaveSubagentConfigInput',
+      parseSaveSubagentConfigInput,
+    ),
   ),
   makeDirectDescriptor(
     'authStart',
@@ -765,6 +837,28 @@ export class AntigravityControlService extends TypertRemoteService {
     abort?.abort(new AntigravityAcpError(reasonMessage, 'ABORTED'));
   }
 
+  private buildSubagentSnapshot(): AntigravitySubagentSettingsSnapshot {
+    const base = this.runtime.getSubagentDefaults?.() ?? {
+      providerName: 'antigravity',
+      toolName: 'antigravity_agent',
+      permissionMode: 'default',
+      permissionFallback: 'reject',
+    };
+    const overrides =
+      this.runtime.getSubagentConfig?.() ??
+      loadSubagentUiOverrides(this.resolveProfileDir(), this.platform);
+
+    return {
+      providerName: base.providerName || 'antigravity',
+      toolName: base.toolName || 'antigravity_agent',
+      defaultModel: overrides.defaultModel ?? base.defaultModel ?? '',
+      defaultThoughtLevel: overrides.defaultThoughtLevel ?? base.defaultThoughtLevel ?? '',
+      permissionMode: overrides.permissionMode ?? base.permissionMode,
+      permissionFallback: overrides.permissionFallback ?? base.permissionFallback,
+      systemPromptAppend: overrides.systemPromptAppend ?? base.systemPromptAppend ?? '',
+    };
+  }
+
   async status(): Promise<AntigravityControlStatusSnapshot> {
     const localInfo = await this.readLocalPluginInfoSafe();
     const snap = await this.runtime.getStatus();
@@ -811,6 +905,7 @@ export class AntigravityControlService extends TypertRemoteService {
         proxyBypass: cfg.proxyBypass ?? '',
         hasApiKey: snap.profile.hasApiKey,
       },
+      subagent: this.buildSubagentSnapshot(),
       pool: {
         activeLeases: snap.activeLeases,
         idleWorkers: snap.idleWorkers,
@@ -987,6 +1082,19 @@ export class AntigravityControlService extends TypertRemoteService {
       );
     });
 
+    return await this.status();
+  }
+
+  async saveSubagentConfig(
+    input: AntigravitySaveSubagentConfigInput,
+  ): Promise<AntigravityControlStatusSnapshot> {
+    const parsed = parseSaveSubagentConfigInput(input);
+    const savedOverrides = await saveSubagentUiOverrides(
+      this.resolveProfileDir(),
+      parsed,
+      this.platform,
+    );
+    this.runtime.updateSubagentConfig?.(savedOverrides);
     return await this.status();
   }
 

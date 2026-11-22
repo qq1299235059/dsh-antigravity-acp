@@ -3,12 +3,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Context, Service, type Fiber } from '@deepseek-ai/cordis';
-import { LlmRuntime } from '@deepseek-ai/dsh-llm';
+import type { SubagentProvider } from '@deepseek-ai/dsh-subagent';
 import { LocalSubprocessRuntime } from '@deepseek-ai/dsh-subprocess-local';
 import { remoteErrorOf, type InvocationDescriptor } from '@deepseek-ai/dsh-typert-protocol';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as runtimePlugin from '../../src/index.js';
-import * as llmPlugin from '../../src/llm-plugin.js';
+import * as subagentPlugin from '../../src/subagent-plugin.js';
 import type { AntigravityControlStatusSnapshot } from '../../src/shared/contracts.js';
 import {
   registerAntigravityControlRemote,
@@ -178,12 +178,12 @@ describe('antigravityControl Typert remote & UI store', () => {
 
     // Named exports only
     expect('default' in runtimePlugin).toBe(false);
-    expect('default' in llmPlugin).toBe(false);
+    expect('default' in subagentPlugin).toBe(false);
 
     // Check Typert contribution contract
     const contrib = typert.contributions.get('dsh-antigravity-acp#host');
     expect(contrib).toBeDefined();
-    expect(contrib!.invocations).toHaveLength(13);
+    expect(contrib!.invocations).toHaveLength(14);
 
     const expectedZeroArg = new Set([
       'status',
@@ -198,6 +198,7 @@ describe('antigravityControl Typert remote & UI store', () => {
     const expectedOneArg = new Set([
       'installCli',
       'saveConfig',
+      'saveSubagentConfig',
       'authStart',
       'authSubmitCode',
       'updatePlugin',
@@ -284,11 +285,20 @@ describe('antigravityControl Typert remote & UI store', () => {
       proxyBypass: '',
       hasApiKey: false,
     });
+    expect(statusSnap.subagent).toEqual({
+      providerName: 'antigravity',
+      toolName: 'antigravity_agent',
+      defaultModel: '',
+      defaultThoughtLevel: '',
+      permissionMode: 'default',
+      permissionFallback: 'reject',
+      systemPromptAppend: '',
+    });
     expect(statusSnap.install.phase).toBe('idle');
     expect(statusSnap.auth.phase).toBe('idle');
     expect(statusSnap.pluginUpdate).toMatchObject({
       packageName: 'dsh-antigravity-acp',
-      currentVersion: '0.2.0',
+      currentVersion: '0.3.0',
       phase: 'idle',
       updateAvailable: false,
       reason: 'unchecked',
@@ -893,59 +903,121 @@ describe('antigravityControl Typert remote & UI store', () => {
     expect('authUrl' in loopbackDone.auth).toBe(false);
   });
 
-  it('activates cleanly in headless Cordis profiles without typert and triggers llm-plugin model refresh on runtime changes', async () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-ctrl-headless-'));
+  it('persists saveSubagentConfig without clobbering runtime config, reloads overrides across restart, and activates headless without typert', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-ctrl-subagent-'));
     tempDirs.push(tempDir);
     const profileDir = path.join(tempDir, 'profile');
-    const fakeBin = createFakeAgyBinary(path.join(tempDir, 'bin'), {
-      FAKE_AGY_WRITE_TOKEN: '1',
-    });
+    const fakeBin = createFakeAgyBinary(path.join(tempDir, 'bin'));
 
-    const ctx = new Context();
-    const updatedEvents: string[] = [];
+    class MockSubagents extends Service {
+      readonly providers = new Map<string, SubagentProvider>();
+      constructor(c: Context) {
+        super(c, 'subagents');
+      }
+      registerProvider(p: SubagentProvider): () => void {
+        this.providers.set(p.name, p);
+        return () => {
+          this.providers.delete(p.name);
+        };
+      }
+      getProvider(name: string): SubagentProvider | undefined {
+        return this.providers.get(name);
+      }
+      resolveMaxDepth(): undefined {
+        return undefined;
+      }
+    }
 
-    const scope = await ctx.plugin(async (scopeCtx) => {
-      scopeCtx.on('llm/models-updated', (providerId) => {
-        updatedEvents.push(providerId);
-      });
+    // 1. Mount runtime + control + subagent-plugin, save both runtime & subagent configs.
+    const ctx1 = new Context();
+    let changedEvents = 0;
+    const scope1 = await ctx1.plugin(async (scopeCtx) => {
       await scopeCtx.plugin(LocalSubprocessRuntime);
-      await scopeCtx.plugin(LlmRuntime);
-
-      // Note: NO typert service mounted!
+      await scopeCtx.plugin(MockTypertRegistry);
+      await scopeCtx.plugin(MockSubagents);
       await scopeCtx.plugin(runtimePlugin, {
         binaryPath: fakeBin,
         profileDir,
         autoDownload: false,
       });
-      await scopeCtx.plugin(llmPlugin, {
-        providerId: 'antigravity-acp',
+      await scopeCtx.plugin(subagentPlugin, {
+        providerName: 'antigravity',
+        toolName: 'antigravity_agent',
+        permissionMode: 'default',
+        permissionFallback: 'reject',
       });
     });
-    fibers.push(scope);
+    fibers.push(scope1);
+    ctx1.antigravityRuntime.onSubagentChanged?.(() => {
+      changedEvents += 1;
+    });
 
-    // No typert control service registered when typert is absent
-    expect(ctx.get('antigravityControl')).toBeUndefined();
-    expect(ctx.get('antigravityRuntime')).toBeDefined();
+    await ctx1.antigravityControl.saveConfig({ proxyBypass: 'localhost,127.0.0.1' });
+    const afterSubSave = await ctx1.antigravityControl.saveSubagentConfig({
+      defaultModel: 'gemini-3-pro',
+      defaultThoughtLevel: 'high',
+      permissionMode: 'auto_edit',
+      permissionFallback: 'cancel',
+      systemPromptAppend: 'Respond concisely.',
+    });
+    assertJsonSafe(afterSubSave);
+    expect(changedEvents).toBe(1);
+    expect(afterSubSave.config.proxyBypass).toBe('localhost,127.0.0.1');
+    expect(afterSubSave.subagent).toEqual({
+      providerName: 'antigravity',
+      toolName: 'antigravity_agent',
+      defaultModel: 'gemini-3-pro',
+      defaultThoughtLevel: 'high',
+      permissionMode: 'auto_edit',
+      permissionFallback: 'cancel',
+      systemPromptAppend: 'Respond concisely.',
+    });
 
-    // Wait for initial model discovery event from background refreshModels
-    await vi.waitFor(
-      () => {
-        expect(updatedEvents.length).toBeGreaterThanOrEqual(1);
-      },
-      { timeout: 5_000, interval: 25 },
-    );
-    const initialCount = updatedEvents.length;
+    // Reject invalid permissionMode cleanly via remoteErrorOf
+    await expect(
+      ctx1.antigravityControl.saveSubagentConfig({
+        permissionMode: 'invalid-mode' as never,
+      }),
+    ).rejects.toMatchObject({ name: expect.stringMatching(/RemoteError|Error/) });
 
-    // Triggering updateConfig notifies onRuntimeChanged -> llm-plugin refreshes models and emits llm/models-updated
-    const spyListModels = vi.spyOn(ctx.antigravityRuntime, 'listModels');
-    await ctx.antigravityRuntime.updateConfig?.({ proxyBypass: 'localhost' });
-    await vi.waitFor(
-      () => {
-        expect(spyListModels).toHaveBeenCalled();
-        expect(updatedEvents.length).toBeGreaterThan(initialCount);
-      },
-      { timeout: 5_000, interval: 25 },
-    );
+    // Saving runtime config again must NOT wipe subagent section in ui-config.json
+    const afterRuntimeSave = await ctx1.antigravityControl.saveConfig({ proxyBypass: 'localhost' });
+    expect(afterRuntimeSave.subagent.defaultModel).toBe('gemini-3-pro');
+
+    // Empty string clears defaultModel without disturbing other fields
+    const afterClear = await ctx1.antigravityControl.saveSubagentConfig({ defaultModel: '' });
+    expect(afterClear.subagent.defaultModel).toBe('');
+    expect(afterClear.subagent.defaultThoughtLevel).toBe('high');
+
+    // Re-set model before reload check
+    await ctx1.antigravityControl.saveSubagentConfig({ defaultModel: 'gemini-2.5-pro' });
+    await scope1.dispose();
+    fibers.pop();
+
+    // 2. Restart headless (NO typert): verify persisted subagent overrides reload cleanly on startup
+    const ctx2 = new Context();
+    const scope2 = await ctx2.plugin(async (scopeCtx) => {
+      await scopeCtx.plugin(LocalSubprocessRuntime);
+      await scopeCtx.plugin(MockSubagents);
+      await scopeCtx.plugin(runtimePlugin, {
+        binaryPath: fakeBin,
+        profileDir,
+        autoDownload: false,
+      });
+      await scopeCtx.plugin(subagentPlugin, {
+        providerName: 'antigravity',
+      });
+    });
+    fibers.push(scope2);
+
+    expect(ctx2.get('antigravityControl')).toBeUndefined();
+    expect(ctx2.antigravityRuntime.getSubagentConfig?.()).toEqual({
+      defaultModel: 'gemini-2.5-pro',
+      defaultThoughtLevel: 'high',
+      permissionMode: 'auto_edit',
+      permissionFallback: 'cancel',
+      systemPromptAppend: 'Respond concisely.',
+    });
   });
 
   it('supports checkUpdate, updatePlugin with Cordis pluginManager + progress events, cancelPluginUpdate, and HMR-safe dispose', async () => {

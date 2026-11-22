@@ -2,9 +2,12 @@
 
 # dsh-antigravity-acp
 
-**面向 DeepSeek Harness (`dsh`) 的双模式 Antigravity ACP (`agy` CLI 1.5.x) 插件套件**
+**面向 DeepSeek Harness (`dsh`) 的 Antigravity ACP (`agy` CLI 1.5.x) Subagent 插件套件**
 
-同时暴露 **`LlmAdapter`（主模型 + 私有 MCP 工具桥）** 与 **`SubagentProvider`（自主外部子 Agent）**，共享同一套托管二进制、隔离凭证、连接池与配额引擎。
+为当前 DSH 会话模型提供开箱即用的 **`antigravity_agent` Subagent 工具**、**`antigravity-subagent` 上下文 Skill**，以及可视化的 **DSH 设置面板（模型选择 / 权限策略 / OAuth 鉴权 / CLI 管理 / 插件更新）**。
+
+> [!NOTE]
+> 为规避直接将 Antigravity 接入主模型 Provider 引发 Google ToS / 风控报错（如异常 429 限流），插件已移除主 `LlmAdapter`（`./llm`）直连模式，专注于更安全、可控的 **Subagent 工具调用形式**。
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22.19-339933.svg)](https://nodejs.org/)
@@ -12,7 +15,7 @@
 [![Cordis](https://img.shields.io/badge/Cordis-4.1.0-0ea5e9.svg)](https://github.com/deepseek-ai/cordis)
 [![ACP](https://img.shields.io/badge/ACP-v1%20(%40agentclientprotocol%2Fsdk%201.4.0)-f59e0b.svg)](https://agentclientprotocol.com/)
 
-[架构总览](#架构总览) · [双模式对比](#双模式对比) · [快速安装](#快速安装) · [DSH 设置菜单](#dsh-设置菜单) · [接线配置](#与-deepseek-aidshtool-subagent-接线) · [独立 CLI](#独立-cli-使用) · [配置参考](#配置项参考) · [故障排查](#错误码与故障排查)
+[架构总览](#架构总览) · [快速安装](#快速安装) · [DSH 设置菜单](#dsh-设置菜单) · [主模型如何调用](#主模型如何调用) · [独立 CLI](#独立-cli-使用) · [配置参考](#配置项参考) · [故障排查](#错误码与故障排查)
 
 </div>
 
@@ -22,16 +25,17 @@
 
 本插件借鉴 [T3 Code](https://github.com/pingdotgg/t3code) 的 `agy` CLI 1.5.x 运行时与鉴权架构，基于 **Cordis `4.1.0`** 与 **`@agentclientprotocol/sdk` `1.4.0`** 为 DeepSeek Harness 提供完整整合：
 
-- **双模式协同，一份基础设施**：通过 [`cordis.patch.yml`](./cordis.patch.yml) 注入共享服务 `antigravity-runtime`（`ctx.antigravityRuntime`），同时驱动主模型适配器（`./llm`）与独立子 Agent（`./subagent`）。
-- **新版 `agy` CLI 1.5.x 运行时管理**：
+- **直接暴露为工具 + Skill，零配置即用**：[`cordis.patch.yml`](./cordis.patch.yml) 自动注入 `antigravity-runtime` 与 `subagent-antigravity-acp`，除在 `ctx.subagents` 注册外部 `SubagentProvider`（`antigravity`）外，还会自动向主会话模型注入：
+  - **`antigravity_agent` 工具**（`ctx.tools`）：当前 DSH 主模型可直接调用 Antigravity 子 Agent 执行代码分析、搜索、实现或复核任务，并在本回合内拿回完整输出。
+  - **`antigravity-subagent` Skill**（`ctx.skills`）与轻量系统提示（`ctx.systemPrompt`）：帮助主模型快速识别何时委派任务、自动读取已配置的模型与使用规范。
+- **DSH 图形化 Subagent 配置面板（`设置 -> Antigravity ACP`）**：
+  - 支持从已发现模型下拉选择，或直接输入自定义 `defaultModel`、`defaultThoughtLevel`（支持点击模型支持的思考强度标签）、`permissionMode`（`default` / `auto_edit` / `auto` / `yolo`）、`permissionFallback` 与 `systemPromptAppend`，并在模型列表卡片提供一键 **“设为 Subagent 模型”** 按钮。
+  - 配置原子持久化至 `<profileDir>/ui-config.json` 并热通知运行时，**下一次工具调用立即生效**，无需重启 DSH。
+- **新版 `agy` CLI 1.5.x 运行时与隔离凭证管理**：
   - 按 `binaryPath` 手动指定 → 托管缓存 → 本机 `PATH` (`agy` / `antigravity`) → 官方更新源自动下载（带 **SHA-512 校验** 与跨进程原子发布锁）四级优先级解析可执行文件，要求版本 `>= 1.5.0`。
-  - 自动隔离 `GEMINI_HOME` 与临时解包目录（Windows 短路径友好、并发写锁 + 重试），清理父进程环境变量防止串号。
-  - `oauth-personal` 模式下注入 `SSH_CONNECTION` 与 `AGY_ACP_FORCE_FILE_STORAGE=1`，避免 `agy` CLI 1.5 写入全局系统 Keyring 导致多账号覆盖。
-- **4 种鉴权方式 + 无头终端登录**：支持 `oauth-personal`、`oauth-business`、`gemini-api-key`、`agent-platform`，以及本地 loopback OAuth 与 `agy acp --login` 授权码粘贴（适合 SSH / 远程环境）；自动剥离 `stdout` OAuth 引导文本防止污染 JSON-RPC NDJSON 流。
-- **原生 ACP 1.5.x 协议能力**：支持 `_meta.antigravity.systemPrompt.append` 追加系统提示、独立 `thought_level` 推理强度发现、多模态图片输入（可选注入 `ctx.get('attachments')`）与会话级前缀增量复用（`SessionReuseTracker`）。
-- **主模型模式严守 DSH 工具边界**：禁用 ACP `fs` / `terminal`，通过 `127.0.0.1:0` 随机端口 + 32 字节随机 Bearer Token 的私有 Streamable HTTP MCP Bridge 将 DSH 工具暴露给模型，支持并发与多轮工具挂起/续传；一切绕过 Bridge 的 Antigravity 原生工具调用都会被立即拦截并报错 `AGY_NATIVE_TOOLS_BLOCKED`。
-- **DSH 图形化设置面板（`设置 -> Antigravity ACP`）**：通过纯浏览器入口 `./client`（`dist/client.js`）与宿主 Typert Remote 服务 `antigravityControl` 联动，直接在 DSH UI 中完成 CLI 一键安装/取消、`binaryPath`/`autoDownload`/代理配置、OAuth 登录（授权码 / 本地回调）或 API Key 鉴权，以及模型列表与配额实时检查。
-- **开箱即用的独立 CLI**：自带 `node:child_process` 轻量 `SubprocessRuntime` 实现，无需预先挂载 DSH 宿主即可完成 `install`、`login`、`models`、`quota` 与 `doctor` 诊断。
+  - 自动隔离 `GEMINI_HOME` 与临时解包目录，注入 `SSH_CONNECTION` 与 `AGY_ACP_FORCE_FILE_STORAGE=1` 防止 `oauth-personal` 模式写入系统 Keyring 造成串号。
+- **4 种鉴权方式 + 无头终端登录**：支持 `oauth-personal`、`oauth-business`、`gemini-api-key`、`agent-platform`，以及授权码粘贴与本地 loopback 回调登录；内置检查更新与在线升级。
+- **开箱即用的独立 CLI**：自带轻量 `SubprocessRuntime` 实现，无需挂载 DSH 宿主即可完成 `install`、`login`、`models`、`quota`、`check-update` 与 `doctor`。
 
 ---
 
@@ -43,51 +47,32 @@ flowchart LR
     UI["DSH Web 设置面板 (./client -> dist/client.js)"]
     RPC["Typert Remote (antigravityControl)"]
     RT["antigravity-runtime (ctx.antigravityRuntime)"]
-    LLM["llm-antigravity-acp (LlmAdapter)"]
-    SUB["subagent-antigravity-acp (SubagentProvider)"]
-    BRIDGE["Private HTTP MCP Bridge (127.0.0.1 + Bearer Token)"]
-    POOL["AcpWorkerPool (1-4 并发 / 会话亲和)"]
-    AGY1["agy acp 1.5.x (主对话进程)"]
-    AGY2["agy acp 1.5.x (一次性隔离进程)"]
+    SUB["subagent-antigravity-acp"]
+    TOOL["antigravity_agent 工具 (ctx.tools)"]
+    SKILL["antigravity-subagent Skill (ctx.skills + systemPrompt)"]
+    POOL["AcpWorkerPool (模型发现 & 运行时管理)"]
+    AGY["agy acp 1.5.x (隔离外部子 Agent 进程)"]
 
     UI <--> RPC
-    DSH --> RPC
     RPC --> RT
     DSH --> RT
-    DSH --> LLM
     DSH --> SUB
-    LLM --> RT
     SUB --> RT
-    LLM <--> BRIDGE
+    SUB --> TOOL
+    SUB --> SKILL
+    TOOL --> SUB
     RT --> POOL
-    POOL --> AGY1
-    BRIDGE <--> AGY1
-    RT --> AGY2
-    SUB <--> AGY2
+    SUB --> AGY
 ```
 
 ### 包导出与服务入口
 
 | 导出路径 / 服务名 | 产物位置 | 运行端 | 说明 |
 | --- | --- | --- | --- |
-| `.` (`dsh-antigravity-acp`) | `dist/index.js` | Node 宿主 | 注册共享服务 `antigravityRuntime`，并在检测到 `typert` 时按需挂载 `antigravityControl` Remote 控制服务 |
-| `./llm` (`dsh-antigravity-acp/llm`) | `dist/llm-plugin.js` | Node 宿主 | 注册主模型 `LlmAdapter`（含私有 HTTP MCP Bridge）并响应运行时变更刷新模型列表 |
-| `./subagent` (`dsh-antigravity-acp/subagent`) | `dist/subagent-plugin.js` | Node 宿主 | 注册外部隔离 `SubagentProvider` |
+| `.` (`dsh-antigravity-acp`) | `dist/index.js` | Node 宿主 | 注册共享服务 `antigravityRuntime`（含 UI 覆盖热加载）并在检测到 `typert` 时挂载 `antigravityControl` Remote 控制服务 |
+| `./subagent` (`dsh-antigravity-acp/subagent`) | `dist/subagent-plugin.js` | Node 宿主 | 注册隔离外部 `SubagentProvider`（`antigravity`）、`antigravity_agent` 工具、`antigravity-subagent` Skill 及系统提示片段 |
 | `./client` (`dsh-antigravity-acp/client`) | `dist/client.js` | Web 浏览器 | 纯浏览器插件（`dsh.client.platform: "web"`），注入 `['slots', 'remote']`，挂载 `antigravityControl` 并注册 `settings.section` 与 `settings.section.icon`（`id: "antigravity-acp"`） |
-| `antigravityControl` (`TypertRemoteService`) | `src/remote/control-remote.ts` | Node 宿主 ↔ 浏览器 | 暴露 `status`、`installCli`、`installCancel`、`saveConfig`、`authStart`、`authSubmitCode`、`authCancel`、`logout`、`refreshModels`、`refreshQuota`、`checkUpdate`、`updatePlugin`、`cancelPluginUpdate` 共 13 个严格 Codec RPC 方法 |
-
----
-
-## 双模式对比
-
-| 维度 | LLM 模式 (`dsh-antigravity-acp/llm`) | Subagent 模式 (`dsh-antigravity-acp/subagent`) |
-| --- | --- | --- |
-| DSH 扩展接口 | `ctx.llm`（继承 `LlmAdapter`） | `ctx.subagents`（实现 `SubagentProvider`） |
-| 进程模型 | 共享 `AcpWorkerPool`（1–4 并发、会话亲和、空闲回收） | 每次 `start()` 派生独立一次性 `agy acp` 进程 |
-| 工具控制权 | **DSH 完全接管**：禁用 ACP `fs`/`terminal`，仅放行私有 MCP Bridge 调用；原生工具命中即触发 `AGY_NATIVE_TOOLS_BLOCKED` | **Antigravity 自主执行**：不挂载 MCP Bridge（`mcpServers: []`），由子进程内 Antigravity Agent Loop 自主调用自身工具 |
-| DSH 工具协作 | 支持单次、并行及多轮 `tools/call` 挂起并在同一 ACP Prompt 内回填续跑 | 不暴露父会话 DSH 工具 |
-| 权限处理 | 仅自动放行来自受信任 `dsh_tools` Bridge 的请求，其余一律拒绝并取消轮次 | 按 `permissionMode`（`default` / `auto_edit` / `auto` / `yolo`）与 `permissionFallback` 决策 |
-| 上下文策略 | 基于 `SessionReuseTracker` 校验 SHA-256 前缀并增量续传；变更或压缩时自动重建 | `inheritsParentContext: false`，仅接收当前委派任务 Prompt |
+| `antigravityControl` (`TypertRemoteService`) | `src/remote/control-remote.ts` | Node 宿主 ↔ 浏览器 | 暴露 `status`、`installCli`、`installCancel`、`saveConfig`、`saveSubagentConfig`、`authStart`、`authSubmitCode`、`authCancel`、`logout`、`refreshModels`、`refreshQuota`、`checkUpdate`、`updatePlugin`、`cancelPluginUpdate` 共 14 个严格 Codec RPC 方法 |
 
 ---
 
@@ -127,12 +112,12 @@ cd dsh-antigravity-acp
 npm ci
 npm run check
 npm pack
-dsh plugin --profile web add /path/to/dsh-antigravity-acp-0.2.0.tgz
+dsh plugin --profile web add /path/to/dsh-antigravity-acp-0.3.0.tgz
 ```
 
 ### 首次初始化与登录
 
-如果你的机器尚未安装 `agy` CLI（`>= 1.5.0`），或希望使用独立隔离登录态，可直接运行内置 CLI（也可跳过安装，由首次调用时按 `autoDownload: true` 自动拉取）：
+如果你的机器尚未安装 `agy` CLI（`>= 1.5.0`），或希望使用独立隔离登录态，可在 **DSH 设置面板** 完成，也可运行内置 CLI：
 
 ```bash
 # 1. 解析或下载官方 agy CLI 并做 SHA-512 校验
@@ -145,12 +130,6 @@ npx dsh-antigravity-acp login --code
 npx dsh-antigravity-acp doctor
 ```
 
-**可执行文件解析优先级**：
-1. 显式配置 `binaryPath`（`configured`，文件名须为 `agy` / `antigravity`）
-2. 插件托管缓存（`cached`，位于 `<cacheDir>/tools/antigravity-acp/<platform>-<arch>`）
-3. 系统 `PATH` 中的本机 `agy` / `antigravity`（`path`）
-4. 当 `autoDownload: true` 时从官方更新源下载并校验 SHA-512（`downloaded`）
-
 ---
 
 ## DSH 设置菜单
@@ -158,71 +137,50 @@ npx dsh-antigravity-acp doctor
 安装并重启 DSH 后，打开左下角 **设置 -> Antigravity ACP** 即可在图形界面中完成全部初始化与日常管理（由 `./client` 浏览器模块通过 `antigravityControl` Typert Remote 服务驱动；无 `typert` 的无头/CLI Profile 不受影响）：
 
 1. **插件版本与更新**
-   - 展示当前已安装插件版本与 GitHub 仓库最新版本号 / Commit SHA、提交说明及检查时间，并顺带检测官方 `agy` CLI 是否有新版本（在 CLI 卡片右上角显示新版徽标）。
-   - 点击 **检查更新** 实时查询 GitHub `main` 分支最新提交与 `package.json` 版本；存在新版本或新提交时，点击 **立即更新** 通过 DSH 插件管理器拉取对应 Commit 并自动完成安装（安装期间支持点击 **取消更新**）。若当前处于非热重载（non-HMR）模式或文件变动需要重启，会展示清晰的重启提示横幅；无头环境也会给出可复制的 `dsh plugin add` 命令行指引。
+   - 展示当前已安装插件版本与 GitHub 仓库最新版本号 / Commit SHA、提交说明及检查时间，并顺带检测官方 `agy` CLI 更新。
+   - 支持 **检查更新**、**立即更新**（通过 DSH 插件管理器拉取最新 Commit）、**取消更新** 与重启提示横幅。
 2. **Antigravity CLI 运行时与一键安装**
-   - 查看当前安装状态（`已安装` / `未安装` / `安装中`）、解析命令路径、来源（`configured` / `cached` / `path` / `downloaded`）、版本号与隔离配置目录。
-   - 点击 **安装 / 更新 Antigravity CLI** 一键下载并校验官方托管版 `agy` CLI；运行期间每 1.5 秒自动轮询进度并可随时点击 **取消安装**。
-   - 若此前设置了自定义 `binaryPath`，界面会提示并提供 **安装托管版 CLI 并切换**，一键清除 `binaryPath` 并安装托管版本。
-   - 可直接编辑并保存 `binaryPath`、`autoDownload`、`proxyUrl` 与 `proxyBypass`（非密钥配置持久化到 `<profileDir>/ui-config.json` 并热更新连接池）。
+   - 查看安装状态、命令路径、来源、版本号与隔离配置目录；点击 **安装 / 更新 Antigravity CLI** 自动下载校验托管版 `agy` CLI。
+   - 支持配置 `binaryPath`、`autoDownload`、`proxyUrl` 与 `proxyBypass`。
 3. **OAuth 与鉴权配置**
-   - 查看实时登录状态、已登录账号与当前鉴权模式，并可在 4 种模式间切换：
-     - `oauth-personal`（Google 个人账号 OAuth — 推荐）
-     - `oauth-business`（Google 企业 / GCP OAuth，支持填写 `gcpProject` 与 `gcpLocation`）
-     - `gemini-api-key`（Gemini API Key）
-     - `agent-platform`（Agent Platform API Key）
-   - OAuth 模式提供 **授权码登录（推荐）**（展示授权链接、`打开授权页面`、`复制授权链接` 及授权码/回调 URL 粘贴提交）与 **本地回调登录**，支持随时 **取消登录** 与 **退出登录**。
-   - API Key 模式提供密码输入框、**保存并验证 API Key** 与 **清除 Key**（密钥独立保存于 `<profileDir>/ui-secrets.json`，`status` 快照仅返回 `hasApiKey` 布尔标记而绝不回传明文密钥）。
-4. **模型与配额**
-   - 一键 **刷新模型列表** 查看已发现模型的名称、ID、默认模型标记及支持的 `thinkingOptions` 推理档位。
-   - 一键 **刷新配额** 查看各个配额窗口的剩余百分比进度条、账号/档位信息与重置时间。
+   - 支持 `oauth-personal`（推荐）、`oauth-business`（GCP Project/Location）、`gemini-api-key`、`agent-platform`。
+   - 提供 **授权码登录（推荐）**（授权页链接、复制、回调 URL 或授权码粘贴提交）与 **本地回调登录**，支持 **取消登录** 与 **退出登录**。
+4. **Subagent 配置（工具与模型）**
+   - 在已发现模型下拉框中选择模型或手动输入 `defaultModel`（如 `gemini-2.5-pro`、`gemini-3-pro`），指定 `defaultThoughtLevel`（可一键点击当前模型支持的思考强度档位）。
+   - 配置 `permissionMode`（`default` / `auto_edit` / `auto` / `yolo`）、`permissionFallback`（`reject` / `cancel`）及可选 `systemPromptAppend` 系统提示追加。
+   - 点击 **保存 Subagent 配置** 后原子写入 `<profileDir>/ui-config.json` 并**立即对下一次 `antigravity_agent` 调用生效**。
+5. **模型与配额**
+   - 一键 **刷新模型列表** 查看已发现模型及其 `thinkingOptions`，每个模型旁可直接点击 **设为 Subagent 模型**。
+   - 一键 **刷新配额** 查看账号各配额窗口的剩余进度条与重置倒计时。
 
 ---
 
-## 与 `@deepseek-ai/dsh-tool-subagent` 接线
+## 主模型如何调用
 
-`package.json` 的 `"dsh": { "bundle": { "patch": "./cordis.patch.yml" } }` 会在安装时插入三个插件行：
+安装本插件后，DSH 当前会话的模型（DeepSeek、OpenAI 等任意主模型）无需手动修改 `cordis.patch.yml`，即可自动看到：
+
+1. **工具 `antigravity_agent`**：
+   - 参数：`description`（简短任务描述）、`prompt`（自包含完整指令）、`cwd`（可选工作目录）、`model`（可选单次覆盖模型 ID）、`thought_level`（可选单次覆盖思考深度）。
+   - 未显式传 `model` / `thought_level` 时自动采用你在 **设置 -> Antigravity ACP -> Subagent** 中配置的模型与权限策略；支持并发多任务调用与随主会话中止信号自动清理子进程。
+2. **Skill `antigravity-subagent`**：
+   - 挂载了 `@deepseek-ai/dsh-tool-skill` 的预设（`standard` / `ptc` / `cordis`）会在 `<available_skills>` 中看到 `antigravity-subagent`，用户也可直接输入 `/antigravity-subagent` 引导调用。
+3. **与原生 `tool-subagent` 兼容**：
+   - 若你在高级自定义场景下需要通过 `@deepseek-ai/dsh-tool-subagent` 对接 `provider: antigravity`，仍需为外部提供者配置 `maxDepth: provider-managed`（因为 `AntigravitySubagentProvider` 声明为 `NO_START_CAPABILITIES`）。
+
+[`cordis.patch.yml`](./cordis.patch.yml) 默认注入两行宿主机插件：
 
 ```yaml
 - insert:
     - id: antigravity-runtime
       name: dsh-antigravity-acp
       inject: [subprocess]
-    - id: llm-antigravity-acp
-      name: dsh-antigravity-acp/llm
-      inject: [llm, antigravityRuntime]
     - id: subagent-antigravity-acp
       name: dsh-antigravity-acp/subagent
       inject: [subagents, antigravityRuntime]
 ```
 
-由于 `AntigravitySubagentProvider` 是**进程外（out-of-process）**外部执行器，其 `capabilities` 声明为 `NO_START_CAPABILITIES`（`agentOptions: false`、`agentPreset: false`、`outputSchema: false`、`depthLimit: false`）。因此通过 `@deepseek-ai/dsh-tool-subagent` 将 `antigravity` 暴露为主模型可用工具时，**必须配置 `maxDepth: provider-managed`**：
-
-```yaml
-plugins:
-  antigravity-runtime:
-    authMethod: oauth-personal
-    maxConcurrentSessions: 2
-
-  llm-antigravity-acp:
-    providerId: antigravity-acp
-    providerName: Antigravity ACP
-
-  subagent-antigravity-acp:
-    providerName: antigravity
-    permissionMode: auto_edit
-    permissionFallback: reject
-
-  tool-subagent:
-    provider: antigravity
-    toolName: antigravity_agent
-    maxDepth: provider-managed
-```
-
 > [!IMPORTANT]
-> Cordis `4.1.0` 的 `inject` 仅接受服务名数组（如 `['llm', 'antigravityRuntime']`），不支持 `{ required, optional }` 写法；可选服务 `attachments` 在插件内部通过 `ctx.get('attachments')` 动态获取。同时三个入口均采用严格命名导出（无 `export default`），以确保 DSH Cordis Loader 正确识别依赖元数据。
-
-如果只需要单模式，在 Profile 中仅保留 `antigravity-runtime` 与 `./llm` 或 `./subagent` 其一即可。
+> Cordis `4.1.0` 的 `inject` 仅接受必填服务名数组（如 `['subagents', 'antigravityRuntime']`）；可选服务 `tools`、`skills`、`systemPrompt` 与 `attachments` 均在插件内部按需注入，因此本插件在独立精简 / 无头 Profile 下同样安全启动。
 
 ---
 
@@ -289,30 +247,16 @@ dsh-antigravity-acp <command> [options]
 | `idleRecycleMs` | `number` | `300000` | 空闲 Worker 回收延迟（毫秒，`0` 表示不自动回收） |
 | `autoWarmup` | `boolean` | `false` | 服务启动后是否在后台非阻塞预热二进制与模型目录 |
 
-### 2. `llm-antigravity-acp` (`LlmPluginConfigSchema`)
-
-| 配置项 | 类型 | 默认值 | 说明 |
-| --- | --- | --- | --- |
-| `providerId` | `string` | `'antigravity-acp'` | 注册到 `ctx.llm` 的 route ID |
-| `providerName` | `string` | `'Antigravity ACP'` | 选择器显示名称 |
-| `defaultModel` | `string` | `undefined` | 未显式指定模型时的默认模型 ID |
-| `contextWindow` | `number` | `128000` | 上游未提供上下文容量时的默认值 |
-| `reuseSessions` | `boolean` | `true` | 历史前缀严格递增时复用 ACP 会话并仅发送增量 |
-| `ignoreUnsupportedOptions` | `boolean` | `true` | 收到 `temperature` / `maxTokens` / `stop` 时忽略并记录警告，为 `false` 则报错 `UNSUPPORTED_OPTION` |
-| `toolTimeoutMs` | `number` | `300000` | MCP Bridge 等待 DSH 执行工具并返回结果的超时（毫秒） |
-| `bridgeParkSettleMs` | `number` | `50` | 并行 `tools/call` 聚合并发窗口（毫秒） |
-| `maxPromptBytes` | `number` | `1000000` | 单轮序列化 Prompt 最大字节预算（超限时先裁剪历史旧轮） |
-| `modelOverrides` | `Record<string, ModelOverrideConfig>` | `{}` | 按模型 ID 覆写 `name`、`description`、`contextWindow`、`defaultMaxTokens`、`inputModalities`、`defaultThoughtLevel` |
-
-### 3. `subagent-antigravity-acp` (`SubagentPluginConfigSchema`)
+### 2. `subagent-antigravity-acp` (`SubagentPluginConfigSchema`)
 
 | 配置项 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `providerName` | `string` | `'antigravity'` | 注册到 `ctx.subagents` 的名称 |
+| `toolName` | `string` | `'antigravity_agent'` | 注册到 `ctx.tools` 供主模型直接调用的工具名 |
 | `permissionMode` | `'default' \| 'auto_edit' \| 'auto' \| 'yolo'` | `'default'` | 权限策略：`yolo` 全部允许；`auto_edit` 自动允许读/搜/改；`auto` / `default` 交由回退策略 |
 | `permissionFallback` | `'reject' \| 'cancel'` | `'reject'` | 非自动放行请求的处理方式（拒绝单次或取消） |
-| `defaultModel` | `string` | `undefined` | 子 Agent 默认模型 ID |
-| `defaultThoughtLevel` | `string` | `undefined` | 子 Agent 默认推理档位 |
+| `defaultModel` | `string` | `undefined` | 子 Agent 默认模型 ID（可在设置 UI 中实时覆写） |
+| `defaultThoughtLevel` | `string` | `undefined` | 子 Agent 默认推理档位（可在设置 UI 中实时覆写） |
 | `systemPromptAppend` | `string` | `undefined` | 通过 `_meta.antigravity.systemPrompt.append` 追加的系统提示词 |
 | `disposeEofGraceMs` | `number` | `6000` | 取消或结束后等待子进程 EOF 退出的宽限（毫秒） |
 | `disposeGraceMs` | `number` | `3000` | 终止信号升级强杀宽限（毫秒） |
@@ -327,11 +271,6 @@ dsh-antigravity-acp <command> [options]
 | `AGY_INSTALL_FAILED` | 官方 manifest 下载、解压或 SHA-512 校验失败；检查网络连接、代理设置与磁盘剩余空间 |
 | `AGY_VERSION_UNSUPPORTED` | 检测到的 `agy` 版本低于 `1.5.0`；请升级官方 CLI 或移除旧版手动覆盖路径 |
 | `AGY_AUTH_REQUIRED` | 隔离 profile 尚未完成登录或凭证已失效；运行 `dsh-antigravity-acp login --code` 重新认证 |
-| `AGY_NATIVE_TOOLS_BLOCKED` | LLM 模式下模型尝试调用 Antigravity 原生工具而非 `dsh_tools` MCP Bridge，已被安全边界阻断 |
-| `AGY_TOOL_TIMEOUT` | MCP Bridge 等待 DSH 执行工具超过 `toolTimeoutMs` |
-| `AGY_TOOL_RESULTS_MISSING` | 工具续传回合缺少与挂起调用对应的 `ToolResultMessage` |
-| `AGY_TOOL_CATALOG_INVALID` | 工具目录超过 256 个、单工具超过 128 KiB 或 JSON Schema 非法 |
-| `AGY_SESSION_LIMIT` | 并发挂起工具调用数超过 64 上限或并发排队请求溢出 |
 | `AGY_PROXY_INVALID` | `proxyUrl` 格式或协议不受支持 |
 | `AGY_ACCOUNT_SUSPENDED` | 上游返回账号停用或服务条款受限 |
 
@@ -346,7 +285,7 @@ npm run typecheck
 # 构建 dist/
 npm run build
 
-# 运行全量单元与双模式集成测试（内置 fake-agy-server.mjs，无需真实账号）
+# 运行全量单元与集成测试（内置 fake-agy-server.mjs，无需真实账号）
 npm test
 
 # 预览 npm 打包文件清单
@@ -357,7 +296,7 @@ npm pack --dry-run
 
 ## 安全边界与声明
 
-- **协议与安全约束**：所有错误对象、诊断信息与 `SubagentResult.diagnostic` 均经过 `redactSensitiveText` 脱敏（剔除 Bearer Token、API Key、OAuth `code`/`state`、Google 登录链接及代理密码）；`LlmAdapter` 的协议禁用 `fs`/`terminal` 能力**属于协议层边界而非操作系统沙箱**。
+- **凭据脱敏与最小权限**：所有错误对象、诊断信息与 `SubagentResult.diagnostic` 均经过 `redactSensitiveText` 脱敏（剔除 Bearer Token、API Key、OAuth `code`/`state`、Google 登录链接及代理密码）；Antigravity Subagent 在独立一次性子进程中运行，并通过 `permissionMode` 与 `permissionFallback` 控制工具授权边界。
 - **第三方软件说明**：本插件在 MIT 协议下开源，属于独立的社区集成实现（并非 Google 或 DeepSeek 官方产品）；运行时按需从 Google 官方渠道下载的 `agy` CLI 适用其各自的第三方条款与许可，不随本代码仓库分发。
 - **致谢**：核心 `agy` CLI 1.5.x 下载校验、隔离配置、`SSH_CONNECTION` 凭据隔离及 ACP 适配设计参考了 [`pingdotgg/t3code`](https://github.com/pingdotgg/t3code)。
 

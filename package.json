@@ -1,8 +1,8 @@
 {
   "name": "dsh-antigravity-acp",
-  "version": "0.2.0",
-  "displayName": "Antigravity ACP (Dual Mode)",
-  "description": "Dual-mode Antigravity ACP (agy CLI 1.5.x) plugin for DeepSeek Harness (DSH): LlmAdapter with private loopback MCP tool bridge + autonomous SubagentProvider",
+  "version": "0.3.0",
+  "displayName": "Antigravity ACP Subagent",
+  "description": "Antigravity ACP (agy CLI 1.5.x) plugin for DeepSeek Harness (DSH): autonomous SubagentProvider, model-facing antigravity_agent tool & skill, and Settings management UI",
   "license": "MIT",
   "author": "ailipi <34607296+qq1299235059@users.noreply.github.com>",
   "repository": {
@@ -21,7 +21,6 @@
     "antigravity",
     "acp",
     "agent-client-protocol",
-    "mcp",
     "cordis",
     "gemini",
     "subagent"
@@ -36,10 +35,6 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    },
-    "./llm": {
-      "types": "./dist/llm-plugin.d.ts",
-      "default": "./dist/llm-plugin.js"
     },
     "./subagent": {
       "types": "./dist/subagent-plugin.d.ts",
@@ -71,25 +66,32 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "build": "tsc -p tsconfig.build.json && node scripts/copy-client.mjs",
+    "build": "node -e \"import('node:fs').then((fs)=>fs.rmSync('dist',{recursive:true,force:true}))\" && tsc -p tsconfig.build.json && node scripts/copy-client.mjs",
     "check": "npm run typecheck && npm run test && npm run build",
     "prepack": "npm run build"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.4.0",
-    "@deepseek-ai/schemastery": "^3.18.4",
-    "@modelcontextprotocol/sdk": "1.32.2"
+    "@deepseek-ai/schemastery": "^3.18.4"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": ">=4.0.4 <5",
     "@deepseek-ai/dsh-llm": ">=0.2.2-rc.1 <0.3.0-0",
     "@deepseek-ai/dsh-subprocess": ">=0.2.2-rc.1 <0.3.0-0",
     "@deepseek-ai/dsh-subagent": ">=0.2.2-rc.1 <0.3.0-0",
+    "@deepseek-ai/dsh-tools": ">=0.2.2-rc.1 <0.3.0-0",
+    "@deepseek-ai/dsh-system-prompt": ">=0.2.2-rc.1 <0.3.0-0",
     "@deepseek-ai/dsh-attachment": ">=0.2.2-rc.1 <0.3.0-0",
     "@deepseek-ai/dsh-typert-protocol": ">=0.2.2-rc.1 <0.3.0-0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-subagent": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-system-prompt": {
       "optional": true
     },
     "@deepseek-ai/dsh-attachment": {
@@ -105,6 +107,8 @@
     "@deepseek-ai/dsh-subagent": "0.2.2-rc.3",
     "@deepseek-ai/dsh-subprocess": "0.2.2-rc.3",
     "@deepseek-ai/dsh-subprocess-local": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-system-prompt": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.3",
     "@deepseek-ai/dsh-attachment": "0.2.2-rc.3",
     "@deepseek-ai/dsh-brand": "0.2.2-rc.3",
     "@deepseek-ai/dsh-session": "0.2.2-rc.3",

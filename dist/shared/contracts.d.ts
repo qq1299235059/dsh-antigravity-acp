@@ -1,6 +1,6 @@
 import type * as acp from '@agentclientprotocol/sdk';
 import type { ModelModality } from '@deepseek-ai/dsh-llm';
-import type { AntigravityAuthMethod, RuntimeConfig } from './config.js';
+import type { AntigravityAuthMethod, AntigravityPermissionFallback, AntigravityPermissionMode, RuntimeConfig, SubagentUiOverrides } from './config.js';
 /** Resolved Antigravity CLI/ACP executable details. */
 export interface AntigravityExecutable {
     /** Executable command or absolute path in the subprocess execution world. */
@@ -263,6 +263,11 @@ export interface AntigravityRuntimeService {
     }): Promise<AntigravityExecutable>;
     updateConfig?(patch: Partial<RuntimeConfig>): Promise<RuntimeConfig>;
     onRuntimeChanged?(listener: () => void): () => void;
+    getSubagentConfig?(): SubagentUiOverrides;
+    updateSubagentConfig?(overrides: SubagentUiOverrides): SubagentUiOverrides;
+    setSubagentDefaults?(defaults: AntigravitySubagentDefaults): void;
+    getSubagentDefaults?(): AntigravitySubagentDefaults;
+    onSubagentChanged?(listener: () => void): () => void;
 }
 /** Phase of a background managed CLI installation task. */
 export type AntigravityInstallTaskPhase = 'idle' | 'running' | 'succeeded' | 'failed' | 'cancelled';
@@ -334,6 +339,26 @@ export interface AntigravityControlModelSummary {
         readonly name: string;
     }[];
 }
+/** Subagent plugin base metadata reported by `subagent-antigravity-acp` to the runtime/settings. */
+export interface AntigravitySubagentDefaults {
+    readonly providerName: string;
+    readonly toolName: string;
+    readonly permissionMode: AntigravityPermissionMode;
+    readonly permissionFallback: AntigravityPermissionFallback;
+    readonly defaultModel?: string;
+    readonly defaultThoughtLevel?: string;
+    readonly systemPromptAppend?: string;
+}
+/** Resolved subagent settings snapshot exposed in {@link AntigravityControlStatusSnapshot}. */
+export interface AntigravitySubagentSettingsSnapshot {
+    readonly providerName: string;
+    readonly toolName: string;
+    readonly defaultModel: string;
+    readonly defaultThoughtLevel: string;
+    readonly permissionMode: AntigravityPermissionMode;
+    readonly permissionFallback: AntigravityPermissionFallback;
+    readonly systemPromptAppend: string;
+}
 /** Complete JSON-safe status snapshot exposed by the `antigravityControl` Typert remote. */
 export interface AntigravityControlStatusSnapshot {
     readonly installed: boolean;
@@ -354,6 +379,7 @@ export interface AntigravityControlStatusSnapshot {
         readonly proxyBypass: string;
         readonly hasApiKey: boolean;
     };
+    readonly subagent: AntigravitySubagentSettingsSnapshot;
     readonly pool: {
         readonly activeLeases: number;
         readonly idleWorkers: number;
@@ -389,6 +415,14 @@ export interface AntigravitySaveConfigInput {
     readonly proxyBypass?: string;
     readonly apiKey?: string;
     readonly clearApiKey?: boolean;
+}
+/** Input payload for `antigravityControl/saveSubagentConfig`. */
+export interface AntigravitySaveSubagentConfigInput {
+    readonly defaultModel?: string;
+    readonly defaultThoughtLevel?: string;
+    readonly permissionMode?: AntigravityPermissionMode;
+    readonly permissionFallback?: AntigravityPermissionFallback;
+    readonly systemPromptAppend?: string;
 }
 /** Input payload for `antigravityControl/authStart`. */
 export interface AntigravityAuthStartInput {
