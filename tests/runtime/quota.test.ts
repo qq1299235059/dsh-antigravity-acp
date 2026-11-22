@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { prepareAntigravityProfile } from '../../src/runtime/profile.js';
+import { ANTIGRAVITY_OAUTH_TOKEN_FILENAME, prepareAntigravityProfile } from '../../src/runtime/profile.js';
 import { probeAntigravityQuota } from '../../src/runtime/quota.js';
 import { RuntimeConfigSchema } from '../../src/shared/config.js';
 
@@ -232,5 +232,90 @@ describe('quota.ts', () => {
         err.retryAfterMs === 12_000 &&
         !err.message.includes(secretToken),
     );
+  });
+
+  it('probes quota from agy 1.5.x antigravity-oauth-token and preserves nested token wrapper on refresh', async () => {
+    const root = makeTempDir();
+    const config = RuntimeConfigSchema({ profileDir: path.join(root, 'p5-agy15') });
+    const profile = await prepareAntigravityProfile(config);
+    const agyTokenPath = path.join(profile.acpDirectory, ANTIGRAVITY_OAUTH_TOKEN_FILENAME);
+    const fixedNow = new Date('2026-11-22T06:00:00.000Z');
+
+    fs.writeFileSync(
+      agyTokenPath,
+      JSON.stringify({
+        token: {
+          access_token: 'ya29.valid_agy15_token',
+          token_type: 'Bearer',
+          refresh_token: '1//agy15_refresh',
+          expiry: new Date(fixedNow.getTime() + 1800_000).toISOString(),
+          expires_in: 1800,
+        },
+        auth_method: 'oauth-personal',
+        id_token_email: 'agy15@example.com',
+      }),
+    );
+
+    const directQuota = await probeAntigravityQuota(config, {
+      now: () => fixedNow,
+      fetch: async (_input, init) => {
+        expect((init?.headers as Record<string, string>).Authorization).toBe(
+          'Bearer ya29.valid_agy15_token',
+        );
+        return new Response(
+          JSON.stringify({
+            currentTier: { name: 'Pro' },
+            buckets: [{ modelId: 'gemini-3-pro', remainingFraction: 0.88 }],
+          }),
+          { status: 200 },
+        );
+      },
+    });
+    expect(directQuota.account).toBe('agy15@example.com');
+    expect(directQuota.windows[0]).toMatchObject({ id: 'gemini-3-pro', remainingFraction: 0.88 });
+
+    // Now write expired token.expiry with client_id and verify nested wrapper refresh
+    fs.writeFileSync(
+      agyTokenPath,
+      JSON.stringify({
+        token: {
+          access_token: 'ya29.stale_agy15',
+          token_type: 'Bearer',
+          refresh_token: '1//agy15_refresh',
+          client_id: 'cid-agy15',
+          expiry: new Date(fixedNow.getTime() - 10_000).toISOString(),
+          expires_in: 10,
+        },
+        auth_method: 'oauth-personal',
+        id_token_email: 'agy15@example.com',
+      }),
+    );
+
+    const refreshedQuota = await probeAntigravityQuota(config, {
+      now: () => fixedNow,
+      fetch: async (input) => {
+        if (String(input) === 'https://oauth2.googleapis.com/token') {
+          return new Response(
+            JSON.stringify({ access_token: 'ya29.refreshed_nested', expires_in: 3600 }),
+            { status: 200 },
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            buckets: [{ id: 'flash', remainingFraction: 1 }],
+          }),
+          { status: 200 },
+        );
+      },
+    });
+    expect(refreshedQuota.windows[0]?.id).toBe('flash');
+
+    const persisted = JSON.parse(fs.readFileSync(agyTokenPath, 'utf8'));
+    expect(persisted.auth_method).toBe('oauth-personal');
+    expect(persisted.id_token_email).toBe('agy15@example.com');
+    expect(persisted.access_token).toBeUndefined();
+    expect(persisted.token.access_token).toBe('ya29.refreshed_nested');
+    expect(persisted.token.expiry).toBe(new Date(fixedNow.getTime() + 3600_000).toISOString());
+    expect(persisted.token.expires_in).toBe(3600);
   });
 });

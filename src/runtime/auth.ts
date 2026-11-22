@@ -12,6 +12,7 @@ import { AntigravityAcpError, redactSensitiveText } from '../shared/errors.js';
 import {
   ANTIGRAVITY_AUTH_BROWSER_MARKER,
   ANTIGRAVITY_AUTH_STDOUT_PREFIX,
+  ANTIGRAVITY_OAUTH_TOKEN_FILENAME,
   type InternalAntigravityProfile,
   type ParsedAntigravityAuthorizationUrl,
   buildAntigravityEnvironment,
@@ -523,6 +524,8 @@ export async function clearProfileAuth(
   const cliTokenPath = internal.cliTokenPath ?? path.join(geminiHome, 'oauth_creds.json');
 
   const filesToRemove = new Set([
+    path.join(acpDirectory, ANTIGRAVITY_OAUTH_TOKEN_FILENAME),
+    path.join(geminiHome, ANTIGRAVITY_OAUTH_TOKEN_FILENAME),
     tokenPath,
     cliTokenPath,
     path.join(acpDirectory, 'antigravity_oauth_creds.json'),

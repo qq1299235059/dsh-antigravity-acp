@@ -4,7 +4,11 @@ import path from 'node:path';
 import type { RuntimeConfig } from '../shared/config.js';
 import type { QuotaSnapshot, QuotaWindow } from '../shared/contracts.js';
 import { AntigravityAcpError, redactSensitiveText } from '../shared/errors.js';
-import { type ResolvedProfilePaths, resolveProfilePaths } from './profile.js';
+import {
+  ANTIGRAVITY_OAUTH_TOKEN_FILENAME,
+  type ResolvedProfilePaths,
+  resolveProfilePaths,
+} from './profile.js';
 
 const OAUTH_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
 const CLOUDCODE_HOSTS = [
@@ -29,9 +33,13 @@ export interface ProbeAntigravityQuotaOptions {
   readonly timeoutMs?: number;
 }
 
+const CREDENTIAL_WRAPPER_KEYS = ['token', 'creds', 'credentials', 'default'] as const;
+type CredentialWrapperKey = (typeof CREDENTIAL_WRAPPER_KEYS)[number];
+
 interface LoadedOAuthCredentials {
   readonly filePath: string;
   readonly rawRoot: Record<string, unknown>;
+  readonly wrapperKey?: CredentialWrapperKey;
   readonly accessToken?: string;
   readonly refreshToken?: string;
   readonly clientId?: string;
@@ -136,18 +144,26 @@ function readJsonRecordSync(filePath: string): Record<string, unknown> | null {
   }
 }
 
-function unwrapCredentialRecord(root: Record<string, unknown>): Record<string, unknown> {
-  for (const key of ['token', 'creds', 'credentials', 'default']) {
+function unwrapCredentialRecord(root: Record<string, unknown>): {
+  readonly record: Record<string, unknown>;
+  readonly wrapperKey?: CredentialWrapperKey;
+} {
+  for (const key of CREDENTIAL_WRAPPER_KEYS) {
     const nested = root[key];
     if (typeof nested === 'object' && nested !== null && !Array.isArray(nested)) {
-      return nested as Record<string, unknown>;
+      return {
+        record: nested as Record<string, unknown>,
+        wrapperKey: key,
+      };
     }
   }
-  return root;
+  return { record: root };
 }
 
 function loadOAuthCredentials(paths: ResolvedProfilePaths): LoadedOAuthCredentials | null {
   const candidates = [
+    path.join(paths.acpDirectory, ANTIGRAVITY_OAUTH_TOKEN_FILENAME),
+    path.join(paths.geminiHome, ANTIGRAVITY_OAUTH_TOKEN_FILENAME),
     paths.cliTokenPath,
     paths.tokenPath,
     path.join(paths.geminiHome, 'antigravity_oauth_creds.json'),
@@ -171,7 +187,7 @@ function loadOAuthCredentials(paths: ResolvedProfilePaths): LoadedOAuthCredentia
     if (!rawRoot) {
       continue;
     }
-    const record = unwrapCredentialRecord(rawRoot);
+    const { record, wrapperKey } = unwrapCredentialRecord(rawRoot);
     const accessToken =
       typeof record.access_token === 'string'
         ? record.access_token.trim() || undefined
@@ -198,20 +214,30 @@ function loadOAuthCredentials(paths: ResolvedProfilePaths): LoadedOAuthCredentia
           : undefined;
     const expiryMs =
       parseTimestampMs(record.expiry_date) ??
+      parseTimestampMs(record.expiry) ??
       parseTimestampMs(record.expires_at) ??
       parseTimestampMs(record.expiresAt);
-    const explicitAccount =
-      typeof record.email === 'string'
-        ? record.email.trim() || undefined
-        : typeof record.account === 'string'
-          ? record.account.trim() || undefined
-          : undefined;
-    const account = explicitAccount ?? decodeJwtEmail(record.id_token ?? record.idToken) ?? accountFallback;
+    const explicitCandidates = [
+      rawRoot.id_token_email,
+      record.id_token_email,
+      record.email,
+      rawRoot.email,
+      record.account,
+      rawRoot.account,
+    ];
+    const explicitAccount = explicitCandidates.find(
+      (v): v is string => typeof v === 'string' && v.trim().length > 0,
+    )?.trim();
+    const account =
+      explicitAccount ??
+      decodeJwtEmail(record.id_token ?? record.idToken ?? rawRoot.id_token ?? rawRoot.idToken) ??
+      accountFallback;
 
     if (accessToken || refreshToken) {
       return {
         filePath,
         rawRoot,
+        ...(wrapperKey ? { wrapperKey } : {}),
         accessToken,
         refreshToken,
         clientId,
@@ -356,27 +382,47 @@ async function refreshOAuthToken(
       : undefined;
   const newExpiryMs = expiresInSec !== undefined ? nowMs + expiresInSec * 1000 : undefined;
 
-  // Best-effort persistence back to the token file using original casing style
+  // Best-effort persistence back to the token file using original wrapper & casing style
   try {
     const updatedRoot: Record<string, unknown> = { ...creds.rawRoot };
+    const existingNested = creds.wrapperKey ? updatedRoot[creds.wrapperKey] : undefined;
+    const targetRecord: Record<string, unknown> =
+      creds.wrapperKey &&
+      typeof existingNested === 'object' &&
+      existingNested !== null &&
+      !Array.isArray(existingNested)
+        ? { ...(existingNested as Record<string, unknown>) }
+        : updatedRoot;
+
     const usesCamel =
-      typeof updatedRoot.accessToken === 'string' || typeof updatedRoot.refreshToken === 'string';
+      typeof targetRecord.accessToken === 'string' ||
+      typeof targetRecord.refreshToken === 'string';
     if (usesCamel) {
-      updatedRoot.accessToken = newAccessToken;
+      targetRecord.accessToken = newAccessToken;
       if (newExpiryMs !== undefined) {
-        updatedRoot.expiresAt = newExpiryMs;
+        targetRecord.expiresAt = newExpiryMs;
       }
       if (payload && typeof payload.refresh_token === 'string' && payload.refresh_token.trim()) {
-        updatedRoot.refreshToken = payload.refresh_token.trim();
+        targetRecord.refreshToken = payload.refresh_token.trim();
       }
     } else {
-      updatedRoot.access_token = newAccessToken;
+      targetRecord.access_token = newAccessToken;
       if (newExpiryMs !== undefined) {
-        updatedRoot.expiry_date = newExpiryMs;
+        if (typeof targetRecord.expiry === 'string' || (!('expiry_date' in targetRecord) && 'expiry' in targetRecord)) {
+          targetRecord.expiry = new Date(newExpiryMs).toISOString();
+        } else {
+          targetRecord.expiry_date = newExpiryMs;
+        }
+      }
+      if (expiresInSec !== undefined && 'expires_in' in targetRecord) {
+        targetRecord.expires_in = expiresInSec;
       }
       if (payload && typeof payload.refresh_token === 'string' && payload.refresh_token.trim()) {
-        updatedRoot.refresh_token = payload.refresh_token.trim();
+        targetRecord.refresh_token = payload.refresh_token.trim();
       }
+    }
+    if (creds.wrapperKey) {
+      updatedRoot[creds.wrapperKey] = targetRecord;
     }
     await fs.promises.writeFile(
       creds.filePath,

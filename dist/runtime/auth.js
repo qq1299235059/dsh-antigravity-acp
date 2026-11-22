@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { AntigravityAcpError, redactSensitiveText } from '../shared/errors.js';
-import { ANTIGRAVITY_AUTH_BROWSER_MARKER, ANTIGRAVITY_AUTH_STDOUT_PREFIX, buildAntigravityEnvironment, parseAntigravityAuthorizationUrl, prepareAntigravityProfile, resolveProfileSnapshot, validateAuthConfig, validateLoginResponse, } from './profile.js';
+import { ANTIGRAVITY_AUTH_BROWSER_MARKER, ANTIGRAVITY_AUTH_STDOUT_PREFIX, ANTIGRAVITY_OAUTH_TOKEN_FILENAME, buildAntigravityEnvironment, parseAntigravityAuthorizationUrl, prepareAntigravityProfile, resolveProfileSnapshot, validateAuthConfig, validateLoginResponse, } from './profile.js';
 const MAX_DIAGNOSTIC_TAIL_CHARS = 8_192;
 const ACCOUNTS_GOOGLE_URL_RE = /https:\/\/accounts\.google\.com\/[^\s"'<>]+/;
 const ACCOUNTS_GOOGLE_URL_GLOBAL_RE = /https:\/\/accounts\.google\.com\/[^\s"'<>]+/gi;
@@ -378,6 +378,8 @@ export async function clearProfileAuth(profile) {
     const tokenPath = internal.tokenPath ?? path.join(acpDirectory, 'oauth_creds.json');
     const cliTokenPath = internal.cliTokenPath ?? path.join(geminiHome, 'oauth_creds.json');
     const filesToRemove = new Set([
+        path.join(acpDirectory, ANTIGRAVITY_OAUTH_TOKEN_FILENAME),
+        path.join(geminiHome, ANTIGRAVITY_OAUTH_TOKEN_FILENAME),
         tokenPath,
         cliTokenPath,
         path.join(acpDirectory, 'antigravity_oauth_creds.json'),

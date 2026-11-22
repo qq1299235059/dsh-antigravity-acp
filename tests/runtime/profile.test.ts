@@ -2,9 +2,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { clearProfileAuth } from '../../src/runtime/auth.js';
 import {
   ANTIGRAVITY_AUTH_BROWSER_MARKER,
   ANTIGRAVITY_AUTH_STDOUT_PREFIX,
+  ANTIGRAVITY_OAUTH_TOKEN_FILENAME,
   buildAcpSpawnArgs,
   buildAntigravityEnvironment,
   parseAntigravityAuthorizationUrl,
@@ -343,5 +345,71 @@ describe('profile.ts', () => {
       expect(prof.profileDir).toBe(results[0]!.profileDir);
       expect(fs.existsSync(path.join(prof.acpDirectory, 'settings.json'))).toBe(true);
     }
+  });
+
+  it('recognizes agy 1.5.x antigravity-oauth-token (token wrapper, expiry, id_token_email) and clears it on logout', async () => {
+    const root = makeTempDir();
+    const profDir = path.join(root, 'agy15');
+    const config = RuntimeConfigSchema({
+      profileDir: profDir,
+      authMethod: 'oauth-personal',
+    });
+    const profile = await prepareAntigravityProfile(config);
+    const tokenFile = path.join(profile.acpDirectory, ANTIGRAVITY_OAUTH_TOKEN_FILENAME);
+
+    // 1. Nested token wrapper with ISO expiry + root id_token_email + refresh_token
+    fs.writeFileSync(
+      tokenFile,
+      JSON.stringify({
+        token: {
+          access_token: 'ya29.real_access_token_1234',
+          token_type: 'Bearer',
+          refresh_token: '1//real_refresh_token_1234',
+          expiry: new Date(Date.now() + 3600_000).toISOString(),
+          expires_in: 3599,
+        },
+        auth_method: 'oauth-personal',
+        id_token_email: 'alice@example.com',
+      }),
+    );
+
+    const loggedIn = resolveProfileSnapshot(config);
+    expect(loggedIn.authenticated).toBe(true);
+    expect(loggedIn.account).toBe('alice@example.com');
+
+    // 2. Expired token.expiry without refresh_token -> authenticated: false
+    fs.writeFileSync(
+      tokenFile,
+      JSON.stringify({
+        token: {
+          access_token: 'ya29.expired_only',
+          token_type: 'Bearer',
+          expiry: new Date(Date.now() - 60_000).toISOString(),
+        },
+        auth_method: 'oauth-personal',
+        id_token_email: 'alice@example.com',
+      }),
+    );
+    expect(resolveProfileSnapshot(config).authenticated).toBe(false);
+
+    // 3. Future token.expiry without refresh_token -> authenticated: true
+    fs.writeFileSync(
+      tokenFile,
+      JSON.stringify({
+        token: {
+          access_token: 'ya29.future_only',
+          token_type: 'Bearer',
+          expiry: new Date(Date.now() + 60_000).toISOString(),
+        },
+        auth_method: 'oauth-personal',
+        id_token_email: 'alice@example.com',
+      }),
+    );
+    expect(resolveProfileSnapshot(config).authenticated).toBe(true);
+
+    // 4. clearProfileAuth deletes antigravity-oauth-token cleanly
+    await clearProfileAuth(profile);
+    expect(fs.existsSync(tokenFile)).toBe(false);
+    expect(resolveProfileSnapshot(config).authenticated).toBe(false);
   });
 });

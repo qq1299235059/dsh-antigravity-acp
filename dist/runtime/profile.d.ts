@@ -4,6 +4,8 @@ import type { AntigravityExecutable, AntigravityProfile } from '../shared/contra
 export declare const ANTIGRAVITY_AUTH_STDOUT_PREFIX = "Open the following link to authenticate the ACP server: ";
 /** Stderr marker emitted by our `BROWSER` interceptor script with a JSON-encoded auth URL. */
 export declare const ANTIGRAVITY_AUTH_BROWSER_MARKER = "__DSH_ANTIGRAVITY_AUTH_URL__";
+/** Token filename written by Antigravity CLI (`agy` 1.5.x) under `<profileDir>/.gemini/antigravity-acp/`. */
+export declare const ANTIGRAVITY_OAUTH_TOKEN_FILENAME = "antigravity-oauth-token";
 /** Ambient environment variables scrubbed before spawning Antigravity ACP processes. */
 export declare const removedEnvironmentKeys: readonly ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_QUOTA_PROJECT", "GOOGLE_GENAI_USE_VERTEXAI", "GCLOUD_PROJECT", "CLOUDSDK_CORE_PROJECT", "AGY_ACP_CCPA_PROJECT", "AGY_ACP_ENABLE_OAUTH", "GEMINI_HOME", "AGY_ACP_FORCE_FILE_STORAGE", "AGY_CLI_DISABLE_AUTO_UPDATE", "BROWSER", "PYTHONUNBUFFERED", "ELECTRON_RUN_AS_NODE", "CHROME_CRASHPAD_PIPE_NAME"];
 /** Internal profile descriptor including filesystem and spawn metadata. */

@@ -7,6 +7,8 @@ import { AntigravityAcpError } from '../shared/errors.js';
 export const ANTIGRAVITY_AUTH_STDOUT_PREFIX = 'Open the following link to authenticate the ACP server: ';
 /** Stderr marker emitted by our `BROWSER` interceptor script with a JSON-encoded auth URL. */
 export const ANTIGRAVITY_AUTH_BROWSER_MARKER = '__DSH_ANTIGRAVITY_AUTH_URL__';
+/** Token filename written by Antigravity CLI (`agy` 1.5.x) under `<profileDir>/.gemini/antigravity-acp/`. */
+export const ANTIGRAVITY_OAUTH_TOKEN_FILENAME = 'antigravity-oauth-token';
 /** Ambient environment variables scrubbed before spawning Antigravity ACP processes. */
 export const removedEnvironmentKeys = [
     'GEMINI_API_KEY',
@@ -242,6 +244,8 @@ function unwrapCredentialRecord(record) {
 }
 function inspectOAuthTokenFiles(paths) {
     const tokenCandidates = [
+        path.join(paths.acpDirectory, ANTIGRAVITY_OAUTH_TOKEN_FILENAME),
+        path.join(paths.geminiHome, ANTIGRAVITY_OAUTH_TOKEN_FILENAME),
         paths.tokenPath,
         paths.cliTokenPath,
         path.join(paths.acpDirectory, 'antigravity_oauth_creds.json'),
@@ -266,6 +270,7 @@ function inspectOAuthTokenFiles(paths) {
                 ? record.accessToken.trim()
                 : '';
         const expiryMs = parseTimestampMs(record.expiry_date) ??
+            parseTimestampMs(record.expiry) ??
             parseTimestampMs(record.expires_at) ??
             parseTimestampMs(record.expiresAt);
         if (refreshToken.length > 0) {
@@ -275,16 +280,20 @@ function inspectOAuthTokenFiles(paths) {
             hasUsableToken = true;
         }
         if (!account) {
-            const explicitAccount = typeof record.email === 'string'
-                ? record.email.trim()
-                : typeof record.account === 'string'
-                    ? record.account.trim()
-                    : '';
+            const explicitCandidates = [
+                rawJson.id_token_email,
+                record.id_token_email,
+                record.email,
+                rawJson.email,
+                record.account,
+                rawJson.account,
+            ];
+            const explicitAccount = explicitCandidates.find((v) => typeof v === 'string' && v.trim().length > 0);
             if (explicitAccount) {
-                account = explicitAccount;
+                account = explicitAccount.trim();
             }
             else {
-                account = decodeJwtEmail(record.id_token ?? record.idToken);
+                account = decodeJwtEmail(record.id_token ?? record.idToken ?? rawJson.id_token ?? rawJson.idToken);
             }
         }
     }

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { AntigravityAcpError, redactSensitiveText } from '../shared/errors.js';
-import { resolveProfilePaths } from './profile.js';
+import { ANTIGRAVITY_OAUTH_TOKEN_FILENAME, resolveProfilePaths, } from './profile.js';
 const OAUTH_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
 const CLOUDCODE_HOSTS = [
     'https://daily-cloudcode-pa.googleapis.com',
@@ -12,6 +12,7 @@ const QUOTA_SUMMARY_PATH = '/v1internal:retrieveUserQuotaSummary';
 const AVAILABLE_MODELS_PATH = '/v1internal:fetchAvailableModels';
 const TOKEN_REFRESH_SKEW_MS = 60_000;
 const SENSITIVE_KEY_RE = /(?:access_?token|refresh_?token|client_?secret|id_?token|api_?key|authorization)/i;
+const CREDENTIAL_WRAPPER_KEYS = ['token', 'creds', 'credentials', 'default'];
 function sanitizeSecrets(text, secrets) {
     let result = redactSensitiveText(text);
     for (const secret of secrets) {
@@ -100,16 +101,21 @@ function readJsonRecordSync(filePath) {
     }
 }
 function unwrapCredentialRecord(root) {
-    for (const key of ['token', 'creds', 'credentials', 'default']) {
+    for (const key of CREDENTIAL_WRAPPER_KEYS) {
         const nested = root[key];
         if (typeof nested === 'object' && nested !== null && !Array.isArray(nested)) {
-            return nested;
+            return {
+                record: nested,
+                wrapperKey: key,
+            };
         }
     }
-    return root;
+    return { record: root };
 }
 function loadOAuthCredentials(paths) {
     const candidates = [
+        path.join(paths.acpDirectory, ANTIGRAVITY_OAUTH_TOKEN_FILENAME),
+        path.join(paths.geminiHome, ANTIGRAVITY_OAUTH_TOKEN_FILENAME),
         paths.cliTokenPath,
         paths.tokenPath,
         path.join(paths.geminiHome, 'antigravity_oauth_creds.json'),
@@ -131,7 +137,7 @@ function loadOAuthCredentials(paths) {
         if (!rawRoot) {
             continue;
         }
-        const record = unwrapCredentialRecord(rawRoot);
+        const { record, wrapperKey } = unwrapCredentialRecord(rawRoot);
         const accessToken = typeof record.access_token === 'string'
             ? record.access_token.trim() || undefined
             : typeof record.accessToken === 'string'
@@ -153,18 +159,26 @@ function loadOAuthCredentials(paths) {
                 ? record.clientSecret.trim() || undefined
                 : undefined;
         const expiryMs = parseTimestampMs(record.expiry_date) ??
+            parseTimestampMs(record.expiry) ??
             parseTimestampMs(record.expires_at) ??
             parseTimestampMs(record.expiresAt);
-        const explicitAccount = typeof record.email === 'string'
-            ? record.email.trim() || undefined
-            : typeof record.account === 'string'
-                ? record.account.trim() || undefined
-                : undefined;
-        const account = explicitAccount ?? decodeJwtEmail(record.id_token ?? record.idToken) ?? accountFallback;
+        const explicitCandidates = [
+            rawRoot.id_token_email,
+            record.id_token_email,
+            record.email,
+            rawRoot.email,
+            record.account,
+            rawRoot.account,
+        ];
+        const explicitAccount = explicitCandidates.find((v) => typeof v === 'string' && v.trim().length > 0)?.trim();
+        const account = explicitAccount ??
+            decodeJwtEmail(record.id_token ?? record.idToken ?? rawRoot.id_token ?? rawRoot.idToken) ??
+            accountFallback;
         if (accessToken || refreshToken) {
             return {
                 filePath,
                 rawRoot,
+                ...(wrapperKey ? { wrapperKey } : {}),
                 accessToken,
                 refreshToken,
                 clientId,
@@ -262,27 +276,46 @@ async function refreshOAuthToken(creds, fetchImpl, nowMs, platform, signal) {
         ? payload.expires_in
         : undefined;
     const newExpiryMs = expiresInSec !== undefined ? nowMs + expiresInSec * 1000 : undefined;
-    // Best-effort persistence back to the token file using original casing style
+    // Best-effort persistence back to the token file using original wrapper & casing style
     try {
         const updatedRoot = { ...creds.rawRoot };
-        const usesCamel = typeof updatedRoot.accessToken === 'string' || typeof updatedRoot.refreshToken === 'string';
+        const existingNested = creds.wrapperKey ? updatedRoot[creds.wrapperKey] : undefined;
+        const targetRecord = creds.wrapperKey &&
+            typeof existingNested === 'object' &&
+            existingNested !== null &&
+            !Array.isArray(existingNested)
+            ? { ...existingNested }
+            : updatedRoot;
+        const usesCamel = typeof targetRecord.accessToken === 'string' ||
+            typeof targetRecord.refreshToken === 'string';
         if (usesCamel) {
-            updatedRoot.accessToken = newAccessToken;
+            targetRecord.accessToken = newAccessToken;
             if (newExpiryMs !== undefined) {
-                updatedRoot.expiresAt = newExpiryMs;
+                targetRecord.expiresAt = newExpiryMs;
             }
             if (payload && typeof payload.refresh_token === 'string' && payload.refresh_token.trim()) {
-                updatedRoot.refreshToken = payload.refresh_token.trim();
+                targetRecord.refreshToken = payload.refresh_token.trim();
             }
         }
         else {
-            updatedRoot.access_token = newAccessToken;
+            targetRecord.access_token = newAccessToken;
             if (newExpiryMs !== undefined) {
-                updatedRoot.expiry_date = newExpiryMs;
+                if (typeof targetRecord.expiry === 'string' || (!('expiry_date' in targetRecord) && 'expiry' in targetRecord)) {
+                    targetRecord.expiry = new Date(newExpiryMs).toISOString();
+                }
+                else {
+                    targetRecord.expiry_date = newExpiryMs;
+                }
+            }
+            if (expiresInSec !== undefined && 'expires_in' in targetRecord) {
+                targetRecord.expires_in = expiresInSec;
             }
             if (payload && typeof payload.refresh_token === 'string' && payload.refresh_token.trim()) {
-                updatedRoot.refresh_token = payload.refresh_token.trim();
+                targetRecord.refresh_token = payload.refresh_token.trim();
             }
+        }
+        if (creds.wrapperKey) {
+            updatedRoot[creds.wrapperKey] = targetRecord;
         }
         await fs.promises.writeFile(creds.filePath, `${JSON.stringify(updatedRoot, null, 2)}\n`, { encoding: 'utf8', mode: platform === 'win32' ? undefined : 0o600 });
     }
